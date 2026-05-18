@@ -1,9 +1,12 @@
 import json
 import sys
+import base64
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -18,6 +21,13 @@ from mask_iteration_webapp.service import (
     SessionStore,
     UploadedTargetStore,
 )
+
+
+def _png_data_url(color="white"):
+    image = Image.new("RGB", (4, 4), color)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 class DummyInference:
@@ -127,6 +137,8 @@ def test_coco_segmentation_and_state_use_current_history(tmp_path):
     service._save_session_outputs(session)
 
     coco = json.loads(Path(session.target.annotation_json_path).read_text(encoding="utf-8"))
+    assert sorted(coco.keys()) == ["annotations", "categories", "images"]
+    assert set(coco["annotations"][0].keys()) == {"id", "image_id", "category_id", "segmentation", "area", "bbox", "iscrowd"}
     assert coco["annotations"][0]["segmentation"]["points"] == [[0, 0]]
     state_path = tmp_path / "runs" / "copy_a" / "annotations" / RUN_KEEP_DIR / RUN_STATE_DIR / "a.json"
     state_payload = json.loads(state_path.read_text(encoding="utf-8"))
@@ -187,7 +199,7 @@ def test_delete_target_writes_deleted_coco_and_state(tmp_path):
     assert deleted_state["sessions"][0]["is_deleted"] is True
 
 
-def test_mark_wrong_target_writes_wrong_coco_state_and_copies_image(tmp_path):
+def test_mark_wrong_target_keeps_deliverable_coco_and_marks_state(tmp_path):
     target_store = UploadedTargetStore(tmp_path / "runs")
     service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
     target = _target(tmp_path)
@@ -198,21 +210,78 @@ def test_mark_wrong_target_writes_wrong_coco_state_and_copies_image(tmp_path):
     service.mark_wrong_target("target_a")
 
     kept_coco = json.loads(Path(session.target.annotation_json_path).read_text(encoding="utf-8"))
-    assert kept_coco["annotations"] == []
+    assert kept_coco["annotations"][0]["id"] == 101
+    assert kept_coco["annotations"][0]["segmentation"]["points"] == [[2, 2]]
 
     wrong_coco_path = tmp_path / "runs" / "copy_a" / "annotations" / RUN_WRONG_DIR / RUN_COCO_DIR / "ann.json"
-    wrong_coco = json.loads(wrong_coco_path.read_text(encoding="utf-8"))
-    assert wrong_coco["annotations"][0]["id"] == 101
-    assert wrong_coco["annotations"][0]["segmentation"]["points"] == [[2, 2]]
+    assert not wrong_coco_path.exists()
 
-    wrong_state_path = tmp_path / "runs" / "copy_a" / "annotations" / RUN_WRONG_DIR / RUN_STATE_DIR / "a.json"
-    wrong_state = json.loads(wrong_state_path.read_text(encoding="utf-8"))
-    assert wrong_state["target_status"] == "wrong"
-    assert wrong_state["sessions"][0]["target_status"] == "wrong"
+    keep_state_path = tmp_path / "runs" / "copy_a" / "annotations" / RUN_KEEP_DIR / RUN_STATE_DIR / "a.json"
+    keep_state = json.loads(keep_state_path.read_text(encoding="utf-8"))
+    assert keep_state["target_status"] == "wrong"
+    assert keep_state["sessions"][0]["target_status"] == "wrong"
+    assert keep_state["sessions"][0]["is_deleted"] is False
 
     assert (tmp_path / "runs" / "copy_a" / "images" / RUN_KEEP_DIR / "a.png").exists()
-    assert (tmp_path / "runs" / "copy_a" / "images" / RUN_WRONG_DIR / "a.png").exists()
-    assert "target_a" not in target_store._targets_by_key
+    assert not (tmp_path / "runs" / "copy_a" / "images" / RUN_WRONG_DIR / "a.png").exists()
+    assert "target_a" in target_store._targets_by_key
+
+    quality_csv = tmp_path / "runs" / "copy_a" / "quality_marked_targets.csv"
+    assert "wrong" in quality_csv.read_text(encoding="utf-8")
+
+
+def test_mark_difficult_target_keeps_data_and_records_csv(tmp_path):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
+    target = _target(tmp_path)
+    target_store._targets_by_key[target.key] = target
+    session = _session(target, current_history_id="iter1")
+    service._save_session_outputs(session)
+
+    service.mark_difficult_target("target_a", reason="hard edge")
+
+    kept_coco = json.loads(Path(session.target.annotation_json_path).read_text(encoding="utf-8"))
+    assert kept_coco["annotations"][0]["id"] == 101
+    keep_state_path = tmp_path / "runs" / "copy_a" / "annotations" / RUN_KEEP_DIR / RUN_STATE_DIR / "a.json"
+    keep_state = json.loads(keep_state_path.read_text(encoding="utf-8"))
+    assert keep_state["target_status"] == "difficult"
+    assert keep_state["sessions"][0]["target_status"] == "difficult"
+    assert keep_state["sessions"][0]["is_deleted"] is False
+    quality_csv = tmp_path / "runs" / "copy_a" / "quality_marked_targets.csv"
+    quality_text = quality_csv.read_text(encoding="utf-8")
+    assert "difficult" in quality_text
+    assert "hard edge" in quality_text
+
+
+def test_fresh_coco_import_does_not_restore_existing_session_by_identity(tmp_path):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    session_store = SessionStore(tmp_path / "sessions")
+    service = MaskIterationService(target_store, session_store, DummyInference())
+    old_target = _target(tmp_path)
+    old_target.key = "old_target_key"
+    old_target.import_id = "old_copy"
+    old_session = _session(old_target, current_history_id="iter1")
+    service._save_session_outputs(old_session)
+
+    payload = service.import_targets(
+        image_file_name="a.png",
+        image_data_url=_png_data_url(),
+        annotation_file_name="ann.json",
+        annotation_text=json.dumps(
+            {
+                "images": [{"id": 1, "height": 4, "width": 4, "file_name": "a.png"}],
+                "categories": [{"id": 1, "name": "box"}],
+                "annotations": [{"id": 101, "image_id": 1, "category_id": 1, "bbox": [0, 0, 2, 2]}],
+            }
+        ),
+        image_set_id="copy_a",
+        annotation_state_id="copy_a",
+    )
+
+    assert payload["restored_session_keys"] == []
+    imported_target = payload["targets"][0]
+    assert imported_target["has_session"] is False
+    assert imported_target["history_count"] == 0
 
 
 def test_open_session_restores_from_run_state_when_session_cache_is_missing(tmp_path):

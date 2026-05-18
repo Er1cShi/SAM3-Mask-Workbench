@@ -208,15 +208,13 @@
       background: var(--blue);
       color: #fff;
     }
-    #deleteTargetBtn,
     #markWrongTargetBtn,
-    #deleteImageBtn {
+    #markBlurryImageBtn {
       border-color: rgba(200, 53, 43, 0.45);
       background: var(--red-soft);
       color: var(--red);
     }
-    #markDifficultBtn,
-    #markBlurryImageBtn {
+    #markDifficultBtn {
       border-color: rgba(183, 106, 18, 0.45);
       background: var(--amber-soft);
       color: var(--amber);
@@ -917,11 +915,9 @@
             <button id="undoBtn" type="button">撤销点</button>
             <button id="clearPointsBtn" type="button">清空点</button>
             <button id="clearLinesBtn" type="button">清空线</button>
-            <button id="deleteTargetBtn" type="button">删除当前框</button>
-            <button id="markWrongTargetBtn" type="button">错误框</button>
-            <button id="deleteImageBtn" type="button">删除整张图</button>
+            <button id="markWrongTargetBtn" type="button">标记错误框</button>
             <button id="markDifficultBtn" type="button">标记难处理</button>
-            <button id="markBlurryImageBtn" type="button">标记模糊图</button>
+            <button id="markBlurryImageBtn" type="button">删除模糊图</button>
           </div>
         </div>
       </aside>
@@ -1071,9 +1067,7 @@
       undoBtn: document.getElementById("undoBtn"),
       clearPointsBtn: document.getElementById("clearPointsBtn"),
       clearLinesBtn: document.getElementById("clearLinesBtn"),
-      deleteTargetBtn: document.getElementById("deleteTargetBtn"),
       markWrongTargetBtn: document.getElementById("markWrongTargetBtn"),
-      deleteImageBtn: document.getElementById("deleteImageBtn"),
       markDifficultBtn: document.getElementById("markDifficultBtn"),
       markBlurryImageBtn: document.getElementById("markBlurryImageBtn"),
       deleteHistoryBtn: document.getElementById("deleteHistoryBtn"),
@@ -1100,6 +1094,7 @@
 
     const COLORS = {
       currentMask: [0, 194, 255],
+      restoredMask: [48, 208, 127],
       compareMask: [255, 79, 143],
       bbox: [64, 223, 133],
       promptBox: [99, 210, 255],
@@ -1132,6 +1127,8 @@
       image: null,
       imageVersion: 0,
       maskCache: new Map(),
+      restoredMaskTargetKeys: new Set(),
+      restoredMaskHistoryByTarget: new Map(),
       selectedHistoryIds: new Set(),
       busy: false,
       currentLabel: 1,
@@ -1402,9 +1399,28 @@
       return `${target.category_name} | ${target.annotation_id} | ${target.image_file_name} | [${bbox}]`;
     }
 
+    function isQueueTarget(target) {
+      const status = String(target && target.target_status || "keep").toLowerCase();
+      return !["delete", "wrong", "difficult"].includes(status);
+    }
+
+    function recordRestoredSessions(payload) {
+      for (const key of (payload && payload.restored_session_keys) || []) {
+        if (key) {
+          state.restoredMaskTargetKeys.add(String(key));
+        }
+      }
+    }
+
     function applyTargets(targets, sourceLabel) {
-      state.targets = Array.isArray(targets) ? targets.slice() : [];
+      const incomingTargets = Array.isArray(targets) ? targets.slice() : [];
+      const queueTargets = incomingTargets.filter(isQueueTarget);
+      const hiddenCount = incomingTargets.length - queueTargets.length;
+      state.targets = queueTargets;
       state.targetSourceLabel = sourceLabel || "最近导入";
+      if (hiddenCount > 0) {
+        state.targetSourceLabel = `${state.targetSourceLabel} | 已隐藏标记框 ${hiddenCount}`;
+      }
       state.pendingNextTargetKey = "";
       if (!state.targets.length) {
         state.selectedTargetKey = "";
@@ -1478,9 +1494,7 @@
       el.panToolBtn.disabled = !hasSession || state.busy;
       el.commitRegionBtn.disabled = !hasSession || state.busy || !canCommitRegion;
       el.cancelRegionBtn.disabled = !hasSession || state.busy || !hasRegionDraft;
-      el.deleteTargetBtn.disabled = !hasSession || state.busy;
       el.markWrongTargetBtn.disabled = !hasSession || state.busy;
-      el.deleteImageBtn.disabled = !hasSession || state.busy;
       el.markDifficultBtn.disabled = !hasSession || state.busy;
       el.markBlurryImageBtn.disabled = !hasSession || state.busy;
       el.deleteHistoryBtn.disabled = !hasSession || state.busy || !state.selectedHistoryIds.size;
@@ -2514,8 +2528,12 @@
       }
       if (current) {
         const decoded = decodeSimpleRLE(current.mask_rle, current.history_id);
+        const restoredHistoryId = state.session ? state.restoredMaskHistoryByTarget.get(state.session.session_id) : null;
+        const maskColor = restoredHistoryId && current.history_id === restoredHistoryId
+          ? COLORS.restoredMask
+          : COLORS.currentMask;
         ctx.drawImage(
-          buildMaskOverlayCanvas(decoded, crop, COLORS.currentMask, Number(el.maskOpacity.value)),
+          buildMaskOverlayCanvas(decoded, crop, maskColor, Number(el.maskOpacity.value)),
           0,
           0
         );
@@ -2620,6 +2638,9 @@
       state.session = payload.session;
       state.validateSession = payload.validate_tools || state.validateSession;
       ensureSessionPromptState(state.session);
+      if (state.session && state.restoredMaskTargetKeys.has(state.session.session_id) && !state.restoredMaskHistoryByTarget.has(state.session.session_id)) {
+        state.restoredMaskHistoryByTarget.set(state.session.session_id, state.session.current_history_id);
+      }
       markCurrentTargetProcessed(state.session);
       state.maskCache.clear();
       resetDrawingRegion();
@@ -3020,6 +3041,7 @@
             annotation_relative_path: annotationFile.webkitRelativePath || annotationFile.name,
           });
           importedTargets.push(...(payload.targets || []));
+          recordRestoredSessions(payload);
         }
 
         if (!importedTargets.length) {
@@ -3091,6 +3113,7 @@
           try {
             const payload = await apiPost("/api/import-targets/batch", { items: chunk });
             importedTargets.push(...(payload.targets || []));
+            recordRestoredSessions(payload);
             for (const item of (payload.errors || [])) {
               failed.push(`${item.annotation_file_name || "annotation"}: ${item.error || "import failed"}`);
             }
@@ -3204,23 +3227,15 @@
         const totalFiles = Math.max(1, selectedAnnotationCount);
         setBusy(`正在导入已有副本 ${selection.copyId}: 0 / ${totalFiles}`);
         setImportProgress(0, totalFiles, `0 / ${totalFiles}`);
-        let payload;
-        let usedFallback = false;
-        try {
-          payload = await importRunCopyFolderViaServerChunks(selection);
-        } catch (error) {
-          if (!/Unknown route:\s*\/api\/import-run-copy\/chunk/i.test(String(error && error.message || error))) {
-            throw error;
-          }
-          usedFallback = true;
-          setBusy(`后端未加载分块接口，使用兼容方式导入 ${selection.copyId}...`);
-          setImportProgress(0, totalFiles, `0 / ${totalFiles}`);
-          payload = await importRunCopyFolderViaBatch(runCopyFiles, selection);
-        }
+        const payload = await importRunCopyFolderViaServerChunks(selection);
         const importedTargets = payload.targets || [];
         if (!importedTargets.length) {
           throw new Error("这个副本里没有可导入的保留目标。");
         }
+        if ((payload.errors || []).length) {
+          throw new Error((payload.errors || []).slice(0, 6).map((item) => `${item.annotation_file_name || "annotation"}: ${item.error || "import failed"}`).join(" | "));
+        }
+        recordRestoredSessions(payload);
 
         state.currentImageSetId = payload.image_set_id || selection.copyId;
         state.currentAnnotationStateId = payload.annotation_state_id || selection.copyId;
@@ -3229,12 +3244,7 @@
           `副本: ${selection.copyId} | 图片 ${selection.keptImageCount} | state ${selection.keptStateCount} | coco ${selection.keptCocoCount}`
         );
 
-        const parts = [`Imported ${importedTargets.length} targets from existing copy ${selection.copyId}${usedFallback ? " (compat mode)" : ""}.`];
-        const errors = payload.errors || [];
-        if (errors.length) {
-          parts.push(`Failed ${errors.length}.`);
-          parts.push(errors.slice(0, 4).map((item) => `${item.annotation_file_name || "annotation"}: ${item.error || "import failed"}`).join(" | "));
-        }
+        const parts = [`Imported ${importedTargets.length} targets from existing copy ${selection.copyId}.`];
         clearBusy(parts.join(" "));
         await openCurrentTarget();
       } catch (error) {
@@ -3248,6 +3258,7 @@
     async function importRunCopyFolderViaServerChunks(selection) {
       const importedTargets = [];
       const allErrors = [];
+      const restoredSessionKeys = new Set();
       const copyId = selection.copyId;
       let offset = 0;
       const selectedAnnotationCount = selection.keptStateCount && (!selection.keptCocoCount || selection.keptStateCount >= selection.keptCocoCount)
@@ -3266,6 +3277,9 @@
         finalPayload = payload;
         importedTargets.push(...(payload.targets || []));
         allErrors.push(...(payload.errors || []));
+        for (const key of payload.restored_session_keys || []) {
+          restoredSessionKeys.add(String(key));
+        }
         const progress = payload.progress || {};
         total = Math.max(1, Number(progress.total || total));
         offset = Math.min(total, Number(progress.processed || offset + RUN_COPY_IMPORT_CHUNK_SIZE));
@@ -3282,6 +3296,7 @@
         annotation_state_id: copyId,
         targets: importedTargets,
         errors: allErrors,
+        restored_session_keys: Array.from(restoredSessionKeys),
       };
     }
 
@@ -3602,28 +3617,6 @@
       return state.selectedTargetKey || "";
     }
 
-    async function handleDeleteTarget() {
-      if (!state.session) return;
-      const target = state.session.target;
-      const ok = window.confirm(`删除当前框？\n${target.category_name} | ${target.annotation_id}`);
-      if (!ok) return;
-      try {
-        setBusy("Deleting current target...");
-        const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/delete-target`, {});
-        const deletedKey = payload.deleted_target_key;
-        if (payload.bootstrap) {
-          state.bootstrap = payload.bootstrap;
-        }
-        removeTargetsAndStayNearCurrent((item) => item.key === deletedKey);
-        await openCurrentTarget();
-        clearBusy("Current target deleted. Next target loaded.");
-      } catch (error) {
-        state.busy = false;
-        renderButtons();
-        setStatus(error.message || String(error), true);
-      }
-    }
-
     async function handleMarkWrongTarget() {
       if (!state.session) return;
       const target = state.session.target;
@@ -3646,31 +3639,6 @@
       }
     }
 
-    async function handleDeleteImage() {
-      if (!state.session) return;
-      const target = state.session.target;
-      const sameImageCount = (state.targets || [])
-        .filter((item) => item.image_file_name === target.image_file_name && item.import_id === target.import_id)
-        .length;
-      const ok = window.confirm(`删除整张图及其所有目标框？\n${target.image_file_name}\n当前列表中匹配 ${sameImageCount || 1} 个目标。`);
-      if (!ok) return;
-      try {
-        setBusy("Deleting current image...");
-        const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/delete-image`, {});
-        const deletedKeys = new Set(payload.deleted_target_keys || []);
-        if (payload.bootstrap) {
-          state.bootstrap = payload.bootstrap;
-        }
-        removeTargetsAndStayNearCurrent((item) => deletedKeys.has(item.key));
-        await openCurrentTarget();
-        clearBusy(`Current image deleted with ${payload.deleted_target_count || deletedKeys.size} target records. Next target loaded.`);
-      } catch (error) {
-        state.busy = false;
-        renderButtons();
-        setStatus(error.message || String(error), true);
-      }
-    }
-
     async function handleMarkDifficult() {
       if (!state.session) return;
       const target = state.session.target;
@@ -3678,9 +3646,12 @@
       if (!ok) return;
       try {
         setBusy("Marking difficult target...");
-        await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/mark-difficult`, {
+        const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/mark-difficult`, {
           reason: "difficult_segmentation",
         });
+        if (payload.bootstrap) {
+          state.bootstrap = payload.bootstrap;
+        }
         removeTargetsAndStayNearCurrent((item) => item.key === target.key);
         await openCurrentTarget();
         clearBusy("Marked difficult target and loaded the next target.");
@@ -3697,10 +3668,10 @@
       const sameImageCount = (state.targets || [])
         .filter((item) => item.image_file_name === target.image_file_name && item.import_id === target.import_id)
         .length;
-      const ok = window.confirm(`标记整张图为模糊图，并移除这张图的所有框？\n${target.image_file_name}\n当前列表中匹配 ${sameImageCount || 1} 个目标。`);
+      const ok = window.confirm(`删除整张模糊图，并移除这张图的所有框？\n${target.image_file_name}\n当前列表中匹配 ${sameImageCount || 1} 个目标。`);
       if (!ok) return;
       try {
-        setBusy("Marking blurry image...");
+        setBusy("Deleting blurry image...");
         const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/mark-blurry-image`, {
           reason: "blurry_image",
         });
@@ -3710,7 +3681,7 @@
         }
         removeTargetsAndStayNearCurrent((item) => deletedKeys.has(item.key));
         await openCurrentTarget();
-        clearBusy(`Marked blurry image and removed ${payload.deleted_target_count || deletedKeys.size} targets. Next target loaded.`);
+        clearBusy(`Deleted blurry image and removed ${payload.deleted_target_count || deletedKeys.size} targets. Next target loaded.`);
       } catch (error) {
         state.busy = false;
         renderButtons();
@@ -4033,9 +4004,7 @@
       el.undoBtn.addEventListener("click", handleUndo);
       el.clearPointsBtn.addEventListener("click", handleClearPoints);
       el.clearLinesBtn.addEventListener("click", handleClearLines);
-      el.deleteTargetBtn.addEventListener("click", handleDeleteTarget);
       el.markWrongTargetBtn.addEventListener("click", handleMarkWrongTarget);
-      el.deleteImageBtn.addEventListener("click", handleDeleteImage);
       el.markDifficultBtn.addEventListener("click", handleMarkDifficult);
       el.markBlurryImageBtn.addEventListener("click", handleMarkBlurryImage);
       el.deleteHistoryBtn.addEventListener("click", handleDeleteSelectedHistories);

@@ -72,7 +72,7 @@ def test_same_image_folder_can_use_independent_annotation_states(tmp_path):
     assert "state_b" in state_b["targets"][0]["key"]
 
 
-def test_reimporting_same_annotation_state_uses_existing_working_copy(tmp_path):
+def test_reimporting_clean_coco_overwrites_existing_working_copy(tmp_path):
     store = UploadedTargetStore(tmp_path / "runs")
 
     store.import_bundle(
@@ -84,9 +84,13 @@ def test_reimporting_same_annotation_state_uses_existing_working_copy(tmp_path):
         annotation_state_id="review_state",
     )
     annotation_path = tmp_path / "runs" / "review_state" / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR / "ann.json"
+    state_path = tmp_path / "runs" / "review_state" / "annotations" / RUN_KEEP_DIR / RUN_STATE_DIR / "a.json"
     edited = json.loads(annotation_path.read_text())
     edited["annotations"] = []
     annotation_path.write_text(json.dumps(edited), encoding="utf-8")
+    state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    state_payload["sessions"] = [_state_payload()["session"]]
+    state_path.write_text(json.dumps(state_payload), encoding="utf-8")
 
     reimported = store.import_bundle(
         image_file_name="a.png",
@@ -97,9 +101,10 @@ def test_reimporting_same_annotation_state_uses_existing_working_copy(tmp_path):
         annotation_state_id="review_state",
     )
 
-    assert reimported["restored_from_working_copy"] is True
-    assert reimported["targets"] == []
-    assert json.loads(annotation_path.read_text())["annotations"] == []
+    assert reimported["restored_from_working_copy"] is False
+    assert len(reimported["targets"]) == 1
+    assert json.loads(annotation_path.read_text())["annotations"][0]["id"] == 101
+    assert json.loads(state_path.read_text(encoding="utf-8"))["sessions"] == []
 
 
 def test_original_direct_import_still_works_without_explicit_state(tmp_path):

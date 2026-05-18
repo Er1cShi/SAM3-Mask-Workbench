@@ -272,7 +272,7 @@ class SessionState:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SessionState":
         target_status = str(payload.get("target_status") or "").strip().lower()
-        if target_status not in {"keep", "delete", "wrong"}:
+        if target_status not in {"keep", "delete", "wrong", "difficult"}:
             target_status = "delete" if bool(payload.get("is_deleted", False)) else "keep"
         return cls(
             schema_version=int(payload.get("schema_version", 1)),

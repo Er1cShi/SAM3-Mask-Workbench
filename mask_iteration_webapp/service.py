@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import csv
 import gc
 import hashlib
 import importlib
@@ -55,7 +56,9 @@ STATE_EXPORT_FORMAT = "mask_iteration_state"
 TARGET_STATUS_KEEP = "keep"
 TARGET_STATUS_DELETE = "delete"
 TARGET_STATUS_WRONG = "wrong"
-TARGET_STATUSES = {TARGET_STATUS_KEEP, TARGET_STATUS_DELETE, TARGET_STATUS_WRONG}
+TARGET_STATUS_DIFFICULT = "difficult"
+TARGET_STATUSES = {TARGET_STATUS_KEEP, TARGET_STATUS_DELETE, TARGET_STATUS_WRONG, TARGET_STATUS_DIFFICULT}
+TARGET_QUALITY_STATUSES = {TARGET_STATUS_WRONG, TARGET_STATUS_DIFFICULT}
 
 
 def compact_path_component(text: str, max_length: int = 48) -> str:
@@ -142,6 +145,23 @@ class SessionStore:
         payload = json.loads(path.read_text(encoding="utf-8"))
         self._hydrate_external_mask_rles(target_key, payload)
         return SessionState.from_dict(payload)
+
+    def delete_session(self, target_key: str) -> None:
+        with self._lock:
+            session_dir = self.session_dir(target_key).resolve()
+            sessions_root = self.sessions_root.resolve()
+            if session_dir.exists():
+                with contextlib.suppress(ValueError):
+                    session_dir.relative_to(sessions_root)
+                    shutil.rmtree(session_dir)
+            index_path = self.target_index_path()
+            entries = self._load_target_index()
+            if target_key in entries:
+                entries.pop(target_key, None)
+                index_path.write_text(
+                    json.dumps({"schema_version": 1, "targets": entries}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
 
     def rekey_session_target(self, target_key: str, target: TargetRecord) -> None:
         session = self.load_session(target_key)
@@ -335,6 +355,7 @@ class SessionStore:
                 "current_history_id": payload.get("current_history_id"),
                 "is_deleted": bool(payload.get("is_deleted", False)),
                 "deleted_at": payload.get("deleted_at"),
+                "target_status": payload.get("target_status"),
                 "target": payload.get("target"),
             }
         for path in self.sessions_root.rglob("session.json"):
@@ -353,6 +374,7 @@ class SessionStore:
                 "current_history_id": payload.get("current_history_id"),
                 "is_deleted": bool(payload.get("is_deleted", False)),
                 "deleted_at": payload.get("deleted_at"),
+                "target_status": payload.get("target_status"),
                 "target": payload.get("target"),
             }
         return results
@@ -935,11 +957,12 @@ class UploadedTargetStore:
         annotation_file_name: str,
         coco_payload: dict[str, Any],
         targets: list[TargetRecord],
+        overwrite: bool = False,
     ) -> Path | None:
         if not targets:
             return None
         state_path = self.state_output_path(targets[0], deleted=False)
-        if state_path.exists():
+        if state_path.exists() and not overwrite:
             return state_path
         payload = {
             "schema_version": 3,
@@ -972,6 +995,7 @@ class UploadedTargetStore:
         annotation_relative_path: str | None = None,
         manifest_cache: dict[str, dict[str, Any]] | None = None,
         persist_manifest: bool = True,
+        fresh_import: bool = True,
     ) -> dict[str, Any]:
         image_file_name = Path(image_file_name or "uploaded_image").name
         annotation_file_name = Path(annotation_file_name or "annotation.json").name
@@ -1028,7 +1052,7 @@ class UploadedTargetStore:
         else:
             working_annotation_payload = annotation_payload
             is_coco_payload = isinstance(annotation_payload.get("annotations"), list) and isinstance(annotation_payload.get("images"), list)
-            if annotation_path.exists():
+            if annotation_path.exists() and not fresh_import:
                 try:
                     existing_payload = json.loads(annotation_path.read_text(encoding="utf-8"))
                 except Exception:
@@ -1036,9 +1060,9 @@ class UploadedTargetStore:
                 if isinstance(existing_payload, dict):
                     working_annotation_payload = existing_payload
                     restored_from_working_copy = True
-            elif is_coco_payload:
+            if not restored_from_working_copy and is_coco_payload:
                 annotation_path.write_text(json.dumps(annotation_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            else:
+            elif not restored_from_working_copy:
                 coco_payload = self._labelstudio_to_coco_payload(
                     annotation_payload=annotation_payload,
                     annotation_file_name=annotation_file_name,
@@ -1074,6 +1098,7 @@ class UploadedTargetStore:
                     annotation_file_name=annotation_path.name,
                     coco_payload=target_source_payload,
                     targets=targets,
+                    overwrite=fresh_import,
                 )
 
         if not targets and not restored_from_working_copy:
@@ -1091,7 +1116,7 @@ class UploadedTargetStore:
             source_files = [
                 item for item in existing_payload.get("source_files", []) if isinstance(item, dict)
             ]
-        elif manifest_path.exists():
+        elif manifest_path.exists() and not fresh_import:
             try:
                 existing_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             except Exception:
@@ -1141,6 +1166,7 @@ class UploadedTargetStore:
             "annotation_file_name": annotation_path.name,
             "annotation_json_path": str(annotation_path.resolve()),
             "restored_from_working_copy": restored_from_working_copy,
+            "allow_session_restore": bool(restored_from_working_copy),
             "source_files": source_files,
             "targets": list(target_payloads_by_key.values()),
         }
@@ -1444,6 +1470,7 @@ class UploadedTargetStore:
             "annotation_file_name": first_annotation_name,
             "annotation_json_path": str(first_annotation_path.resolve()) if first_annotation_path else None,
             "restored_from_working_copy": use_state_files,
+            "allow_session_restore": True,
             "source_files": list(source_files_by_key.values()),
             "targets": list(targets_by_key.values()),
         }
@@ -1533,6 +1560,7 @@ class UploadedTargetStore:
             "annotation_file_name": (first_annotation_path.name if first_annotation_path else existing_payload.get("annotation_file_name") or existing_first.get("annotation_file_name")),
             "annotation_json_path": (str(first_annotation_path.resolve()) if first_annotation_path else existing_payload.get("annotation_json_path") or existing_first.get("annotation_json_path")),
             "restored_from_working_copy": bool(sources["use_state_files"]),
+            "allow_session_restore": True,
             "source_files": list(source_files_by_key.values()),
             "targets": all_targets,
         }
@@ -1584,6 +1612,7 @@ class UploadedTargetStore:
             "annotation_file_name": payload.get("annotation_file_name"),
             "annotation_json_path": payload.get("annotation_json_path"),
             "restored_from_working_copy": bool(payload.get("restored_from_working_copy", False)),
+            "allow_session_restore": bool(payload.get("allow_session_restore", False)),
             "source_files": payload.get("source_files") or [],
             "targets": targets,
         }
@@ -1638,6 +1667,21 @@ class UploadedTargetStore:
             encoding="utf-8",
         )
         with self._lock:
+            new_keys = {
+                str(item.get("key") or "")
+                for item in manifest_payload.get("targets", []) or []
+                if isinstance(item, dict)
+            }
+            existing_payload = self._imports_by_id.get(import_id)
+            if existing_payload:
+                for target in existing_payload.get("targets", []) or []:
+                    target_key = ""
+                    if isinstance(target, TargetRecord):
+                        target_key = target.key
+                    elif isinstance(target, dict):
+                        target_key = str(target.get("key") or "")
+                    if target_key and target_key not in new_keys:
+                        self._targets_by_key.pop(target_key, None)
             self._register_manifest_payload(manifest_payload)
 
     def _save_import_manifest(self, import_id: str) -> None:
@@ -1662,6 +1706,7 @@ class UploadedTargetStore:
             "annotation_file_name": payload.get("annotation_file_name"),
             "annotation_json_path": payload.get("annotation_json_path"),
             "restored_from_working_copy": bool(payload.get("restored_from_working_copy", False)),
+            "allow_session_restore": bool(payload.get("allow_session_restore", False)),
             "source_files": payload.get("source_files") or [],
             "targets": [target.to_dict() for target in payload.get("targets", [])],
         }
@@ -2716,6 +2761,57 @@ class MaskIterationService:
             return {"size": [int(value) for value in encoded["size"]], "counts": counts}
         return self.inference_service._mask_to_rle(mask_bool.astype(bool))
 
+    @staticmethod
+    def _deliverable_coco_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        annotations = [item for item in payload.get("annotations", []) if isinstance(item, dict)]
+        image_ids = {item.get("image_id") for item in annotations if item.get("image_id") is not None}
+        image_names = {
+            Path(str(item.get("file_name") or "")).name
+            for item in payload.get("images", [])
+            if isinstance(item, dict)
+        }
+        category_ids = {item.get("category_id") for item in annotations if item.get("category_id") is not None}
+
+        images: list[dict[str, Any]] = []
+        for image in payload.get("images", []) or []:
+            if not isinstance(image, dict):
+                continue
+            if image_ids and image.get("id") not in image_ids and Path(str(image.get("file_name") or "")).name not in image_names:
+                continue
+            item: dict[str, Any] = {}
+            for field in ("id", "file_name", "width", "height"):
+                if field in image:
+                    item[field] = image[field]
+            if item:
+                images.append(item)
+
+        categories: list[dict[str, Any]] = []
+        for category in payload.get("categories", []) or []:
+            if not isinstance(category, dict):
+                continue
+            if category_ids and category.get("id") not in category_ids:
+                continue
+            item: dict[str, Any] = {}
+            for field in ("id", "name", "supercategory"):
+                if field in category:
+                    item[field] = category[field]
+            if item:
+                categories.append(item)
+
+        cleaned_annotations: list[dict[str, Any]] = []
+        for annotation in annotations:
+            item: dict[str, Any] = {}
+            for field in ("id", "image_id", "category_id", "segmentation", "area", "bbox", "iscrowd"):
+                if field in annotation:
+                    item[field] = annotation[field]
+            cleaned_annotations.append(item)
+
+        return {
+            "images": images,
+            "annotations": cleaned_annotations,
+            "categories": categories,
+        }
+
     def _save_coco_segmentation_output(self, session: SessionState) -> Path | None:
         target = session.target
         source_path = Path(target.annotation_json_path)
@@ -2748,6 +2844,7 @@ class MaskIterationService:
             return None
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._deliverable_coco_payload(payload)
         output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return output_path
 
@@ -2756,7 +2853,8 @@ class MaskIterationService:
         target_status = session.target_status if session.target_status in TARGET_STATUSES else (
             TARGET_STATUS_DELETE if session.is_deleted else TARGET_STATUS_KEEP
         )
-        state_path = self.target_store.state_output_path(target, status=target_status)
+        output_status = TARGET_STATUS_DELETE if target_status == TARGET_STATUS_DELETE else TARGET_STATUS_KEEP
+        state_path = self.target_store.state_output_path(target, status=output_status)
         coco_payload = None
         coco_path = Path(target.annotation_json_path)
         if coco_path.exists():
@@ -3099,16 +3197,88 @@ class MaskIterationService:
                 torch.mps.empty_cache()
         gc.collect()
 
+    def _quality_records_csv_path(self, import_id: str | None) -> Path:
+        return self.target_store.run_copy_root(import_id) / "quality_marked_targets.csv"
+
+    def _append_quality_target_record(
+        self,
+        session: SessionState,
+        status: str,
+        marked_at: str,
+        reason: str | None = None,
+    ) -> None:
+        target = session.target
+        path = self._quality_records_csv_path(target.import_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fields = [
+            "marked_at",
+            "status",
+            "reason",
+            "import_id",
+            "target_key",
+            "image_file_name",
+            "annotation_file_name",
+            "annotation_id",
+            "source_annotation_id",
+            "category_name",
+            "category_id",
+            "bbox_xywh",
+            "bbox_xyxy",
+        ]
+        existing_keys: set[tuple[str, str]] = set()
+        if path.exists():
+            with contextlib.suppress(Exception):
+                with path.open("r", encoding="utf-8", newline="") as handle:
+                    for row in csv.DictReader(handle):
+                        existing_keys.add((str(row.get("target_key") or ""), str(row.get("status") or "")))
+        record_key = (target.key, status)
+        if record_key in existing_keys:
+            return
+        write_header = not path.exists() or path.stat().st_size == 0
+        with path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "marked_at": marked_at,
+                    "status": status,
+                    "reason": reason or "",
+                    "import_id": target.import_id or "",
+                    "target_key": target.key,
+                    "image_file_name": target.image_file_name,
+                    "annotation_file_name": target.annotation_file_name,
+                    "annotation_id": target.annotation_id,
+                    "source_annotation_id": target.source_annotation_id or "",
+                    "category_name": target.category_name,
+                    "category_id": "" if target.category_id is None else target.category_id,
+                    "bbox_xywh": json.dumps(target.bbox_xywh, ensure_ascii=False),
+                    "bbox_xyxy": json.dumps(target.bbox_xyxy, ensure_ascii=False),
+                }
+            )
+
     def _mark_session_issue(self, target_key: str, issue_type: str, reason: str | None = None) -> dict[str, Any]:
         with self._lock:
             session = self._require_session(target_key)
             target = session.target
             now = utc_now_iso()
             if issue_type == "difficult":
+                session.is_deleted = False
+                session.target_status = TARGET_STATUS_DIFFICULT
+                session.deleted_at = None
+                session.updated_at = now
+                self._save_session_outputs(session)
+                self._append_quality_target_record(
+                    session,
+                    TARGET_STATUS_DIFFICULT,
+                    now,
+                    reason=reason or "difficult_segmentation",
+                )
                 record = {
                     "schema_version": 1,
                     "issue_id": f"difficult_{uuid4().hex[:12]}",
-                    "issue_type": "difficult",
+                    "issue_type": TARGET_STATUS_DIFFICULT,
+                    "target_status": TARGET_STATUS_DIFFICULT,
                     "marked_at": now,
                     "reason": reason or None,
                     "target": target.to_dict(),
@@ -3131,7 +3301,17 @@ class MaskIterationService:
                     folder / compact_path_component(target.import_id or "legacy_session", max_length=40),
                     suffix=f"difficult_{sanitize_component(target.annotation_id)}",
                 )
-                return {"ok": True, "issue": record, "copied_annotation_path": str(copied_path) if copied_path else None}
+                return {
+                    "ok": True,
+                    "issue": record,
+                    "difficult_target_key": target_key,
+                    "target_status": TARGET_STATUS_DIFFICULT,
+                    "marked_at": now,
+                    "target": session.target.to_dict(),
+                    "quality_records_path": str(self._quality_records_csv_path(target.import_id).resolve()),
+                    "copied_annotation_path": str(copied_path) if copied_path else None,
+                    "bootstrap": self.bootstrap_payload(),
+                }
 
             if issue_type == "blurry_image":
                 image_targets = sorted(
@@ -3923,6 +4103,7 @@ class MaskIterationService:
 
     def _prepare_import_response(self, manifest: dict[str, Any]) -> dict[str, Any]:
         target_items = [item for item in manifest.get("targets", []) if isinstance(item, dict)]
+        allow_session_restore = bool(manifest.get("allow_session_restore", False))
         restored_session_keys: list[str] = []
         for session_payload in manifest.get("restored_sessions", []) or []:
             if not isinstance(session_payload, dict):
@@ -3934,6 +4115,9 @@ class MaskIterationService:
             restored_session_keys.append(restored_session.session_id)
         for item in target_items:
             target = TargetRecord.from_dict(item)
+            if not allow_session_restore:
+                self.session_store.delete_session(target.key)
+                continue
             existing = self.session_store.load_session(target.key)
             if existing is not None:
                 if existing.target.to_dict() != target.to_dict():
@@ -4016,6 +4200,7 @@ class MaskIterationService:
             "image_file_name": first_import.get("image_file_name"),
             "annotation_file_name": first_import.get("annotation_file_name"),
             "restored_from_working_copy": bool(first_import.get("restored_from_working_copy", False)),
+            "allow_session_restore": bool(first_import.get("allow_session_restore", False)),
             "targets": batch.get("targets") or [],
             "restored_sessions": batch.get("restored_sessions") or [],
         }
@@ -4071,9 +4256,15 @@ class MaskIterationService:
                 continue
             session_payload["session_id"] = target.key
             session_payload["target"] = target.to_dict()
-            session_payload["target_status"] = target_status
-            if target_status != TARGET_STATUS_KEEP:
+            restored_status = str(session_payload.get("target_status") or target_status).strip().lower()
+            if restored_status not in TARGET_STATUSES:
+                restored_status = target_status
+            session_payload["target_status"] = restored_status
+            if restored_status == TARGET_STATUS_DELETE:
                 session_payload["is_deleted"] = True
+            elif restored_status in TARGET_QUALITY_STATUSES:
+                session_payload["is_deleted"] = False
+                session_payload["deleted_at"] = None
             try:
                 return SessionState.from_dict(session_payload)
             except Exception:
@@ -4325,51 +4516,20 @@ class MaskIterationService:
         with self._lock:
             session = self._require_session(target_key)
             marked_at = utc_now_iso()
-            session.is_deleted = True
+            session.is_deleted = False
             session.target_status = TARGET_STATUS_WRONG
-            session.deleted_at = marked_at
+            session.deleted_at = None
             session.updated_at = marked_at
             self._save_session_outputs(session)
+            self._append_quality_target_record(session, TARGET_STATUS_WRONG, marked_at, reason="wrong_target")
             target = session.target
-            self.session_store.add_target_deletion_record(
-                {
-                    "deletion_id": f"target_wrong_{uuid4().hex[:12]}",
-                    "scope": "target",
-                    "target_status": TARGET_STATUS_WRONG,
-                    "deleted_at": marked_at,
-                    "source": "mask_iteration_webapp",
-                    "session_id": session.session_id,
-                    "target_key": target.key,
-                    "annotation_id": target.annotation_id,
-                    "source_annotation_id": target.source_annotation_id,
-                    "result_index": target.result_index,
-                    "category_id": target.category_id,
-                    "category_name": target.category_name,
-                    "image_file_name": target.image_file_name,
-                    "annotation_file_name": target.annotation_file_name,
-                    "annotation_json_path": target.annotation_json_path,
-                    "import_id": target.import_id,
-                    "imported_at": target.imported_at,
-                    "bbox_xywh": target.bbox_xywh,
-                    "bbox_xyxy": target.bbox_xyxy,
-                }
-            )
-            self._remove_target_from_annotation_copy(target, status=RUN_WRONG_DIR)
-            wrong_image_path = self.target_store.wrong_image_path(target)
-            source_image_path = Path(target.image_path)
-            if source_image_path.exists():
-                wrong_image_path.parent.mkdir(parents=True, exist_ok=True)
-                if source_image_path.resolve() != wrong_image_path.resolve():
-                    shutil.copy2(source_image_path, wrong_image_path)
-            self.target_store.remove_targets({target.key})
             return {
                 "ok": True,
                 "wrong_target_key": target_key,
-                "deleted_target_key": target_key,
                 "target_status": TARGET_STATUS_WRONG,
                 "marked_at": marked_at,
                 "target": session.target.to_dict(),
-                "wrong_image_path": str(wrong_image_path.resolve()),
+                "quality_records_path": str(self._quality_records_csv_path(target.import_id).resolve()),
                 "bootstrap": self.bootstrap_payload(),
             }
 
