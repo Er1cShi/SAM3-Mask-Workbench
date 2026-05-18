@@ -346,6 +346,41 @@ def test_batch_import_persists_manifest_once_per_copy(tmp_path):
     assert persist_calls == ["copy_a"]
 
 
+def test_batch_import_merges_existing_manifest_across_requests(tmp_path):
+    store = UploadedTargetStore(tmp_path / "runs")
+    first_batch = [
+        {
+            "image_file_name": f"a_{index}.png",
+            "image_data_url": _png_data_url("white"),
+            "annotation_file_name": f"ann_{index}.json",
+            "annotation_text": json.dumps(_coco(annotation_id=index + 1, image_name=f"a_{index}.png")),
+            "image_set_id": "copy_a",
+            "annotation_state_id": "copy_a",
+        }
+        for index in range(2)
+    ]
+    second_batch = [
+        {
+            "image_file_name": "a_2.png",
+            "image_data_url": _png_data_url("white"),
+            "annotation_file_name": "ann_2.json",
+            "annotation_text": json.dumps(_coco(annotation_id=3, image_name="a_2.png")),
+            "image_set_id": "copy_a",
+            "annotation_state_id": "copy_a",
+        }
+    ]
+
+    first_import = store.import_bundles(first_batch)
+    second_import = store.import_bundles(second_batch)
+
+    manifest_payload = json.loads((tmp_path / "runs" / "copy_a" / "manifest.json").read_text(encoding="utf-8"))
+    first_key = first_import["targets"][0]["key"]
+    second_key = second_import["targets"][0]["key"]
+    assert len(manifest_payload["targets"]) == 3
+    assert store.get_target(first_key).key == first_key
+    assert store.get_target(second_key).key == second_key
+
+
 def test_import_existing_run_copy_restores_state_without_creating_new_copy(tmp_path):
     store = UploadedTargetStore(tmp_path / "runs")
     copy_root = tmp_path / "runs" / "copy_a"

@@ -1116,6 +1116,17 @@ class UploadedTargetStore:
             source_files = [
                 item for item in existing_payload.get("source_files", []) if isinstance(item, dict)
             ]
+        elif manifest_cache is not None and manifest_path.exists():
+            try:
+                existing_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing_payload = {}
+            existing_targets = [
+                item for item in existing_payload.get("targets", []) if isinstance(item, dict)
+            ]
+            source_files = [
+                item for item in existing_payload.get("source_files", []) if isinstance(item, dict)
+            ]
         elif manifest_path.exists() and not fresh_import:
             try:
                 existing_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
