@@ -2368,6 +2368,48 @@ class Sam3InferenceService:
             "text_prompt": prompt,
         }
 
+    def _initial_category_prompt_points(self, target: TargetRecord, prompt_box_xyxy: list[float]) -> list[PointRecord]:
+        prompt = str(target.category_name or "").strip()
+        if not prompt or prompt.lower() == "object":
+            return []
+        try:
+            grounded = self.ground_text_with_box(
+                target=target,
+                prompt_box_xyxy=prompt_box_xyxy,
+                text_prompt=prompt,
+            )
+        except Exception:
+            return []
+        if not grounded:
+            return []
+        np = self._load_runtime()["np"]
+        mask = np.asarray(grounded["mask"]).astype(bool)
+        ys, xs = np.where(mask)
+        if len(xs) == 0:
+            return []
+        candidates: list[tuple[float, float]] = [(float(xs.mean()), float(ys.mean()))]
+        extrema = [
+            (float(xs[xs.argmin()]), float(ys[xs.argmin()])),
+            (float(xs[xs.argmax()]), float(ys[xs.argmax()])),
+            (float(xs[ys.argmin()]), float(ys.min())),
+            (float(xs[ys.argmax()]), float(ys.max())),
+        ]
+        for point in extrema:
+            if all(hypot(point[0] - existing[0], point[1] - existing[1]) > 8.0 for existing in candidates):
+                candidates.append(point)
+        created_at = utc_now_iso()
+        return [
+            PointRecord(
+                point_id=f"initial_category_prompt_{index}",
+                x=float(x),
+                y=float(y),
+                label=1,
+                created_at=created_at,
+                source="category",
+            )
+            for index, (x, y) in enumerate(candidates[:5])
+        ]
+
     def predict_initial(self, target: TargetRecord) -> dict[str, Any]:
         model, processor, resolved_device = self._ensure_model()
         runtime = self._load_runtime()
@@ -2385,6 +2427,15 @@ class Sam3InferenceService:
             target.image_width,
             target.image_height,
         )
+        system_prompt_points = self._initial_category_prompt_points(target, prompt_box_xyxy)
+        point_coords = None
+        point_labels = None
+        if system_prompt_points:
+            point_coords = np.asarray(
+                [[float(point.x), float(point.y)] for point in system_prompt_points],
+                dtype=np.float32,
+            )
+            point_labels = np.asarray([int(point.label) for point in system_prompt_points], dtype=np.int64)
         autocast_context = (
             torch.autocast(device_type=resolved_device, enabled=False)
             if resolved_device in {"cuda", "mps"}
@@ -2394,8 +2445,8 @@ class Sam3InferenceService:
             state = processor.set_image(image)
             masks, scores, logits = model.predict_inst(
                 state,
-                point_coords=None,
-                point_labels=None,
+                point_coords=point_coords,
+                point_labels=point_labels,
                 box=np.asarray([prompt_box_xyxy], dtype=np.float32),
                 mask_input=None,
                 multimask_output=False,
@@ -2403,7 +2454,7 @@ class Sam3InferenceService:
         best_mask, score, best_logits = self._select_best_prediction(masks, scores, logits)
         return {
             "prompt_box_xyxy": [float(value) for value in prompt_box_xyxy],
-            "system_prompt_points": [],
+            "system_prompt_points": system_prompt_points,
             "mask_rle": self._mask_to_rle(best_mask),
             "mask_area": int(best_mask.sum()),
             "mask_bbox_xywh": self._mask_to_xywh(best_mask),

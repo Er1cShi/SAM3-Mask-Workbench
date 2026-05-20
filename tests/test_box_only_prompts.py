@@ -26,6 +26,25 @@ class FakeProcessor:
         return {"image": image}
 
 
+class CategoryPromptProcessor:
+    def __init__(self):
+        self.text_prompts = []
+
+    def set_image(self, image):
+        return {"image": image}
+
+    def set_text_prompt(self, prompt, state):
+        self.text_prompts.append(prompt)
+        state["text_prompt"] = prompt
+
+    def add_geometric_prompt(self, box, label, state):
+        return {
+            "masks": np.asarray([[[False, True], [False, True]]], dtype=bool),
+            "boxes": np.asarray([[2.0, 2.0, 6.0, 6.0]], dtype=np.float32),
+            "scores": np.asarray([0.9], dtype=np.float32),
+        }
+
+
 class FakeTorch:
     class cuda:
         @staticmethod
@@ -90,7 +109,7 @@ def _target(tmp_path):
     )
 
 
-def _service(model):
+def _service(model, processor=None):
     service = Sam3InferenceService(
         project_root=Path("."),
         sam3_repo_dir=Path("."),
@@ -99,13 +118,28 @@ def _service(model):
         device="cpu",
         reference_box_expand_px=0,
     )
-    service._ensure_model = lambda: (model, FakeProcessor(), "cpu")
+    service._ensure_model = lambda: (model, processor or FakeProcessor(), "cpu")
     service._load_runtime = lambda: {"np": np, "torch": FakeTorch, "mask_utils": None}
     service._load_image = lambda image_path: object()
     return service
 
 
-def test_initial_prediction_uses_box_without_center_point(tmp_path):
+def test_initial_prediction_uses_category_prompt_points_with_box(tmp_path):
+    model = FakeModel()
+    processor = CategoryPromptProcessor()
+    target = _target(tmp_path)
+    target.category_name = "apple"
+    result = _service(model, processor=processor).predict_initial(target)
+
+    assert processor.text_prompts == ["apple"]
+    assert [point.source for point in result["system_prompt_points"]] == ["category"]
+    assert len(model.calls) == 1
+    assert model.calls[0]["point_coords"].shape == (1, 2)
+    assert model.calls[0]["point_labels"].tolist() == [1]
+    assert model.calls[0]["box"].tolist() == [[2.0, 2.0, 6.0, 6.0]]
+
+
+def test_initial_prediction_falls_back_to_box_only_when_category_prompt_unavailable(tmp_path):
     model = FakeModel()
     result = _service(model).predict_initial(_target(tmp_path))
 

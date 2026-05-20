@@ -34,3 +34,13 @@ def test_run_copy_import_uploads_selected_folder_instead_of_reading_runs_copy():
     assert "importRunCopyFolderViaServerChunks(selection)" not in import_body
     assert "compat mode" not in import_body
     assert "fallback" not in import_body.lower()
+
+
+def test_prompt_record_hover_highlights_canvas_items():
+    html = _html()
+
+    assert "function wirePromptRecordHover" in html
+    assert "data-hover-kind" in html
+    assert "state.hoverPrompt" in html
+    assert "function isHoveredPrompt" in html
+    assert "drawPromptLabel" in html

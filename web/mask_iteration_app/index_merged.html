@@ -438,6 +438,18 @@
       background: var(--surface);
       padding: 6px 8px;
     }
+    .prompt-record {
+      cursor: default;
+      transition: border-color 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+    }
+    .prompt-record:hover,
+    .prompt-record.hover-active,
+    .prompt-record:focus-visible {
+      border-color: rgba(11, 95, 204, 0.52);
+      background: var(--blue-soft);
+      box-shadow: 0 0 0 2px rgba(11, 95, 204, 0.12);
+      outline: none;
+    }
     .meta-card .k {
       font-size: 11px;
       text-transform: uppercase;
@@ -1176,6 +1188,7 @@
         points: [],
         hoverPoint: null,
       },
+      hoverPrompt: null,
     };
 
     function clamp(value, min, max) {
@@ -1454,6 +1467,7 @@
       state.drawingStroke.active = false;
       state.drawingStroke.points = [];
       resetDrawingRegion();
+      state.hoverPrompt = null;
       el.textPromptInput.value = "";
       renderCategoryFilter();
       renderTargetList();
@@ -1954,6 +1968,44 @@
       `).join("");
     }
 
+    function promptRecordAttrs(kind, id) {
+      return `data-hover-kind="${escapeHtml(kind)}" data-hover-id="${escapeHtml(id || "")}" tabindex="0"`;
+    }
+
+    function setHoveredPrompt(kind, id) {
+      state.hoverPrompt = kind && id ? { kind, id } : null;
+      document.querySelectorAll(".prompt-record.hover-active").forEach((card) => {
+        card.classList.remove("hover-active");
+      });
+      if (state.hoverPrompt) {
+        document.querySelectorAll(
+          `.prompt-record[data-hover-kind="${CSS.escape(kind)}"][data-hover-id="${CSS.escape(id)}"]`
+        ).forEach((card) => card.classList.add("hover-active"));
+      }
+      renderCanvas();
+    }
+
+    function clearHoveredPrompt(kind, id) {
+      if (!state.hoverPrompt) return;
+      if (kind && id && (state.hoverPrompt.kind !== kind || state.hoverPrompt.id !== id)) return;
+      state.hoverPrompt = null;
+      document.querySelectorAll(".prompt-record.hover-active").forEach((card) => {
+        card.classList.remove("hover-active");
+      });
+      renderCanvas();
+    }
+
+    function wirePromptRecordHover(container) {
+      container.querySelectorAll("[data-hover-kind][data-hover-id]").forEach((card) => {
+        const kind = card.dataset.hoverKind;
+        const id = card.dataset.hoverId;
+        card.addEventListener("mouseenter", () => setHoveredPrompt(kind, id));
+        card.addEventListener("mouseleave", () => clearHoveredPrompt(kind, id));
+        card.addEventListener("focus", () => setHoveredPrompt(kind, id));
+        card.addEventListener("blur", () => clearHoveredPrompt(kind, id));
+      });
+    }
+
     function renderPointList() {
       if (!state.session) {
         el.pointList.innerHTML = `<div class="empty">暂无打开的会话。</div>`;
@@ -1969,9 +2021,9 @@
       const rows = [];
       systemPoints.forEach((point, index) => {
         rows.push(`
-          <div class="point-card">
+          <div class="point-card prompt-record" ${promptRecordAttrs("point", point.point_id || `system_${index}`)}>
             <div class="point-row">
-              <div><strong>S${index + 1}</strong> <span class="pill system">system</span></div>
+              <div><strong>S${index + 1}</strong> <span class="pill system">${escapeHtml(point.source || "system")}</span></div>
               <div>(${round2(point.x)}, ${round2(point.y)})</div>
             </div>
           </div>
@@ -1981,7 +2033,7 @@
         const pillClass = point.label === 1 ? "fg" : "bg";
         const pillText = point.label === 1 ? "foreground" : "background";
         rows.push(`
-          <div class="point-card">
+          <div class="point-card prompt-record" ${promptRecordAttrs("point", point.point_id || `point_${index}`)}>
             <div class="point-row">
               <div><strong>#${index + 1}</strong> <span class="pill ${pillClass}">${pillText}</span></div>
               <div class="button-row">
@@ -1993,6 +2045,7 @@
         `);
       });
       el.pointList.innerHTML = rows.join("");
+      wirePromptRecordHover(el.pointList);
       el.pointList.querySelectorAll("[data-point-delete]").forEach((button) => {
         button.addEventListener("click", async () => {
           try {
@@ -2127,7 +2180,7 @@
         const pillClass = Number(stroke.label) === 1 ? "fg" : "bg";
         const pillText = Number(stroke.label) === 1 ? "foreground" : "background";
         return `
-          <div class="stroke-card">
+          <div class="stroke-card prompt-record" ${promptRecordAttrs("stroke", stroke.stroke_id || `stroke_${index}`)}>
             <div class="stroke-row">
               <div>
                 <strong>L${index + 1}</strong>
@@ -2142,6 +2195,7 @@
         `;
       }).join("");
 
+      wirePromptRecordHover(el.strokeList);
       el.strokeList.querySelectorAll("[data-stroke-delete]").forEach((button) => {
         button.addEventListener("click", async () => {
           if (!state.session) return;
@@ -2175,7 +2229,7 @@
 
       if (state.drawingRegion.active && draftPoints.length) {
         cards.push(`
-          <div class="stroke-card">
+          <div class="stroke-card prompt-record" ${promptRecordAttrs("region", "draft")}>
             <div class="stroke-row">
               <div>
                 <strong>Draft</strong>
@@ -2197,7 +2251,7 @@
       }
 
       cards.push(...regions.map((region, index) => `
-        <div class="stroke-card">
+        <div class="stroke-card prompt-record" ${promptRecordAttrs("region", region.region_id || `region_${index}`)}>
           <div class="stroke-row">
             <div>
               <strong>R${index + 1}</strong>
@@ -2212,6 +2266,7 @@
       `));
       el.lockedRegionList.innerHTML = cards.join("");
 
+      wirePromptRecordHover(el.lockedRegionList);
       el.lockedRegionList.querySelectorAll("[data-region-commit]").forEach((button) => {
         button.addEventListener("click", () => {
           if (state.busy) return;
@@ -2375,31 +2430,86 @@
       el.preview.value = JSON.stringify(preview, null, 2);
     }
 
+    function isHoveredPrompt(kind, id) {
+      return Boolean(state.hoverPrompt && state.hoverPrompt.kind === kind && state.hoverPrompt.id === id);
+    }
+
+    function drawPromptLabel(ctx, text, x, y) {
+      const label = String(text || "");
+      if (!label) return;
+      ctx.font = "11px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+      const paddingX = 5;
+      const paddingY = 3;
+      const width = Math.ceil(ctx.measureText(label).width + paddingX * 2);
+      const height = 18;
+      const left = Math.min(Math.max(4, x + 8), Math.max(4, ctx.canvas.width - width - 4));
+      const top = Math.min(Math.max(4, y - height - 8), Math.max(4, ctx.canvas.height - height - 4));
+      ctx.fillStyle = "rgba(9, 16, 24, 0.86)";
+      ctx.fillRect(left, top, width, height);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(left, top, width, height);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
+      ctx.fillText(label, left + paddingX, top + 12);
+    }
+
     function drawPoints(ctx, points, crop, fixedColor, radius) {
-      points.forEach((point) => {
+      points.forEach((point, index) => {
         const x = Number(point.x) - crop.x0;
         const y = Number(point.y) - crop.y0;
         if (x < -20 || y < -20 || x > crop.width + 20 || y > crop.height + 20) {
           return;
         }
+        const hovered = isHoveredPrompt("point", point.point_id || `point_${index}`);
         const color = fixedColor || (Number(point.label) === 1 ? COLORS.fg : COLORS.bg);
         ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.96)`;
         ctx.strokeStyle = "rgba(10, 14, 18, 0.95)";
-        ctx.lineWidth = 0.6;
+        if (hovered) {
+          ctx.beginPath();
+          ctx.arc(x, y, radius + 6, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.2)`;
+          ctx.fill();
+          ctx.strokeStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.95)`;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.96)`;
+        ctx.strokeStyle = hovered ? "rgba(255, 255, 255, 0.98)" : "rgba(10, 14, 18, 0.95)";
+        ctx.lineWidth = hovered ? 1.4 : 0.6;
         ctx.beginPath();
-        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.arc(x, y, hovered ? radius + 2.5 : radius, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+        if (hovered) {
+          drawPromptLabel(ctx, point.source === "category" ? "category" : `point ${index + 1}`, x, y);
+        }
       });
     }
 
     function drawLineStrokes(ctx, strokes, crop) {
-      (strokes || []).forEach((stroke) => {
+      (strokes || []).forEach((stroke, strokeIndex) => {
         const points = stroke.points || [];
         if (!points.length) return;
+        const hovered = isHoveredPrompt("stroke", stroke.stroke_id || `stroke_${strokeIndex}`);
         const color = Number(stroke.label) === 1 ? COLORS.strokeFg : COLORS.strokeBg;
-        ctx.strokeStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.82)`;
-        ctx.lineWidth = 2;
+        if (hovered) {
+          ctx.strokeStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.2)`;
+          ctx.lineWidth = 8;
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.beginPath();
+          points.forEach((point, index) => {
+            const x = Number(point.x) - crop.x0;
+            const y = Number(point.y) - crop.y0;
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+        ctx.strokeStyle = hovered
+          ? `rgba(${color[0]}, ${color[1]}, ${color[2]}, 1)`
+          : `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.82)`;
+        ctx.lineWidth = hovered ? 3.4 : 2;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
         ctx.beginPath();
@@ -2413,6 +2523,10 @@
           }
         });
         ctx.stroke();
+        if (hovered) {
+          const first = points[0];
+          drawPromptLabel(ctx, `line ${strokeIndex + 1}`, Number(first.x) - crop.x0, Number(first.y) - crop.y0);
+        }
       });
 
       if (state.drawingStroke.active && state.drawingStroke.points.length) {
@@ -2436,9 +2550,10 @@
     }
 
     function drawLockedRegions(ctx, regions, crop) {
-      (regions || []).forEach((region) => {
+      (regions || []).forEach((region, regionIndex) => {
         const points = region.points || [];
         if (points.length < 3) return;
+        const hovered = isHoveredPrompt("region", region.region_id || `region_${regionIndex}`);
         ctx.beginPath();
         points.forEach((point, index) => {
           const x = Number(point.x) - crop.x0;
@@ -2450,11 +2565,19 @@
           }
         });
         ctx.closePath();
-        ctx.fillStyle = `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.18)`;
-        ctx.strokeStyle = `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.92)`;
-        ctx.lineWidth = 1.4;
+        ctx.fillStyle = hovered
+          ? `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.3)`
+          : `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.18)`;
+        ctx.strokeStyle = hovered
+          ? "rgba(255, 255, 255, 0.96)"
+          : `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.92)`;
+        ctx.lineWidth = hovered ? 3.4 : 1.4;
         ctx.fill();
         ctx.stroke();
+        if (hovered) {
+          const first = points[0];
+          drawPromptLabel(ctx, `lock ${regionIndex + 1}`, Number(first.x) - crop.x0, Number(first.y) - crop.y0);
+        }
       });
 
       if (state.drawingRegion.active && state.drawingRegion.points.length) {
@@ -2463,6 +2586,7 @@
         const canClose = canCloseDrawingRegionAtPoint(hoverPoint);
         const previewClosePoint = hoverPoint || points[points.length - 1];
         const startPoint = points[0];
+        const draftHovered = isHoveredPrompt("region", "draft");
 
         if (points.length >= 3) {
           ctx.beginPath();
@@ -2476,7 +2600,9 @@
             }
           });
           ctx.closePath();
-          ctx.fillStyle = `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.12)`;
+          ctx.fillStyle = draftHovered
+            ? `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.24)`
+            : `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.12)`;
           ctx.fill();
         }
 
@@ -2490,11 +2616,16 @@
             ctx.lineTo(x, y);
           }
         });
-        ctx.strokeStyle = `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.96)`;
-        ctx.lineWidth = 1.8;
+        ctx.strokeStyle = draftHovered
+          ? "rgba(255, 255, 255, 0.96)"
+          : `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.96)`;
+        ctx.lineWidth = draftHovered ? 3.2 : 1.8;
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
         ctx.stroke();
+        if (draftHovered && startPoint) {
+          drawPromptLabel(ctx, "draft lock", Number(startPoint.x) - crop.x0, Number(startPoint.y) - crop.y0);
+        }
 
         if (hoverPoint) {
           ctx.beginPath();
