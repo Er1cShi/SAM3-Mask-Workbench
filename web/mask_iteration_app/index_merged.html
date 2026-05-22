@@ -805,8 +805,8 @@
                   <button id="importBtn" class="import-export-action" type="button">导入文件夹</button>
                   <div class="import-export-row">
                     <div class="field">
-                      <label for="runCopyFolderUpload">导入已有副本文件夹</label>
-                      <input id="runCopyFolderUpload" type="file" webkitdirectory directory multiple>
+                      <label for="runCopyPathInput">导入当前副本文件夹路径</label>
+                      <input id="runCopyPathInput" type="text" placeholder="C:\path\to\copy_folder">
                     </div>
                   </div>
                   <button id="importRunCopyBtn" class="import-export-action" type="button">导入当前副本</button>
@@ -1054,7 +1054,7 @@
     const el = {
       imageFolderUpload: document.getElementById("imageFolderUpload"),
       annotationFolderUpload: document.getElementById("annotationFolderUpload"),
-      runCopyFolderUpload: document.getElementById("runCopyFolderUpload"),
+      runCopyPathInput: document.getElementById("runCopyPathInput"),
       annotationStateNameInput: document.getElementById("annotationStateNameInput"),
       exportDatasetNameInput: document.getElementById("exportDatasetNameInput"),
       exportPathDisplayInput: document.getElementById("exportPathDisplayInput"),
@@ -3483,16 +3483,17 @@
     }
 
     async function importRunCopyFolder() {
-      const runCopyFiles = Array.from((el.runCopyFolderUpload.files || []));
+      const copyRootPath = (el.runCopyPathInput.value || "").trim();
       try {
-        const selection = detectRunCopyFolder(runCopyFiles);
-        const selectedAnnotationCount = selection.keptStateCount && (!selection.keptCocoCount || selection.keptStateCount >= selection.keptCocoCount)
-          ? selection.keptStateCount
-          : selection.keptCocoCount;
-        const totalFiles = Math.max(1, selectedAnnotationCount);
-        setBusy(`正在导入已有副本 ${selection.copyId}: 0 / ${totalFiles}`);
-        setImportProgress(0, totalFiles, `0 / ${totalFiles}`);
-        const payload = await importRunCopyFolderViaBatch(runCopyFiles, selection);
+        if (!copyRootPath) {
+          throw new Error("请填写要直接读取和改写的副本文件夹路径。");
+        }
+        setBusy(`正在导入当前副本: ${copyRootPath}`);
+        const payload = await apiPost(
+          "/api/import-run-copy-path",
+          { copy_root_path: copyRootPath },
+          { timeoutMs: 90000 }
+        );
         const importedTargets = payload.targets || [];
         if (!importedTargets.length) {
           throw new Error("这个副本里没有可导入的保留目标。");
@@ -3502,15 +3503,14 @@
         }
         recordRestoredSessions(payload);
 
-        state.currentImageSetId = payload.image_set_id || selection.copyId;
-        state.currentAnnotationStateId = payload.annotation_state_id || selection.copyId;
+        state.currentImageSetId = payload.image_set_id || payload.import_id || "";
+        state.currentAnnotationStateId = payload.annotation_state_id || payload.import_id || "";
         applyTargets(
           importedTargets,
-          `副本: ${selection.copyId} | 图片 ${selection.keptImageCount} | state ${selection.keptStateCount} | coco ${selection.keptCocoCount}`
+          `当前副本: ${copyRootPath}`
         );
 
-        const parts = [`Imported ${importedTargets.length} targets from existing copy ${selection.copyId}.`];
-        clearBusy(parts.join(" "));
+        clearBusy(`Imported ${importedTargets.length} targets from current copy.`);
         await openCurrentTarget();
       } catch (error) {
         state.busy = false;
@@ -3518,164 +3518,6 @@
         renderButtons();
         setStatus(error.message || String(error), true);
       }
-    }
-
-    async function importRunCopyFolderViaServerChunks(selection) {
-      const importedTargets = [];
-      const allErrors = [];
-      const restoredSessionKeys = new Set();
-      const copyId = selection.copyId;
-      let offset = 0;
-      const selectedAnnotationCount = selection.keptStateCount && (!selection.keptCocoCount || selection.keptStateCount >= selection.keptCocoCount)
-        ? selection.keptStateCount
-        : selection.keptCocoCount;
-      let total = Math.max(1, selectedAnnotationCount);
-      let finalPayload = null;
-      while (true) {
-        setBusy(`正在导入已有副本 ${copyId}: ${Math.min(offset, total)} / ${total}`);
-        setImportProgress(offset, total, `${offset} / ${total}`);
-        const payload = await apiPost(
-          "/api/import-run-copy/chunk",
-          { copy_id: copyId, offset, limit: RUN_COPY_IMPORT_CHUNK_SIZE },
-          { timeoutMs: 90000 }
-        );
-        finalPayload = payload;
-        importedTargets.push(...(payload.targets || []));
-        allErrors.push(...(payload.errors || []));
-        for (const key of payload.restored_session_keys || []) {
-          restoredSessionKeys.add(String(key));
-        }
-        const progress = payload.progress || {};
-        total = Math.max(1, Number(progress.total || total));
-        offset = Math.min(total, Number(progress.processed || offset + RUN_COPY_IMPORT_CHUNK_SIZE));
-        setBusy(`正在导入已有副本 ${copyId}: ${offset} / ${total}`);
-        setImportProgress(offset, total, `${offset} / ${total}`);
-        if (!progress.has_more) break;
-        await new Promise((resolve) => window.setTimeout(resolve, 0));
-      }
-      return {
-        ...(finalPayload || {}),
-        ok: !allErrors.length,
-        import_id: copyId,
-        image_set_id: copyId,
-        annotation_state_id: copyId,
-        targets: importedTargets,
-        errors: allErrors,
-        restored_session_keys: Array.from(restoredSessionKeys),
-      };
-    }
-
-    async function importRunCopyFolderViaBatch(runCopyFiles, selection) {
-      const files = splitRunCopyFiles(runCopyFiles, selection);
-      if (!files.images.length) {
-        throw new Error("这个副本缺少 images/keep 下的图片。");
-      }
-      if (!files.annotations.length) {
-        throw new Error("这个副本缺少 annotations/keep/state 或 annotations/keep/coco 下的标注。");
-      }
-
-      const imageIndex = buildImageFileIndex(files.images);
-      const importedTargets = [];
-      const failed = [];
-      const restoredSessionKeys = new Set();
-      let pendingImports = [];
-      const imageDataUrlCache = new Map();
-      let uploadedImportCount = 0;
-      let batchIndex = 0;
-      let didResetRunCopy = false;
-      const copyId = selection.copyId;
-      const flushPendingImports = async () => {
-        if (!pendingImports.length) return;
-        batchIndex += 1;
-        const chunk = pendingImports;
-        pendingImports = [];
-        const start = uploadedImportCount + 1;
-        const end = uploadedImportCount + chunk.length;
-        setBusy(`正在导入副本 ${start}-${end} / ${files.annotations.length}...`);
-        setImportProgress(start - 1, files.annotations.length, `${start - 1} / ${files.annotations.length}`);
-        try {
-          const requestPayload = { items: chunk };
-          if (!didResetRunCopy) {
-            requestPayload.reset_import_id = copyId;
-          }
-          const payload = await apiPost("/api/import-targets/batch", requestPayload, { timeoutMs: 90000 });
-          if (requestPayload.reset_import_id) {
-            didResetRunCopy = true;
-          }
-          importedTargets.push(...(payload.targets || []));
-          for (const key of payload.restored_session_keys || []) {
-            restoredSessionKeys.add(String(key));
-          }
-          for (const item of (payload.errors || [])) {
-            failed.push(`${item.annotation_file_name || "annotation"}: ${item.error || "import failed"}`);
-          }
-        } catch (error) {
-          failed.push(`Batch ${batchIndex}: ${error.message || error}`);
-        } finally {
-          uploadedImportCount = end;
-          setImportProgress(uploadedImportCount, files.annotations.length, `${uploadedImportCount} / ${files.annotations.length}`);
-          imageDataUrlCache.clear();
-        }
-      };
-
-      for (let index = 0; index < files.annotations.length; index += 1) {
-        const annotationFile = files.annotations[index];
-        const fileLabel = annotationFile.webkitRelativePath || annotationFile.name;
-        setBusy(`正在导入副本 ${index + 1} / ${files.annotations.length}: ${fileLabel}`);
-        setImportProgress(index, files.annotations.length, `${index} / ${files.annotations.length}`);
-        try {
-          const annotationText = await readFileAsText(annotationFile);
-          let annotationPayload = JSON.parse(annotationText);
-          if (Array.isArray(annotationPayload)) {
-            if (annotationPayload.length !== 1 || typeof annotationPayload[0] !== "object") {
-              failed.push(`${annotationFile.name}: JSON 顶层不是单图对象`);
-              continue;
-            }
-            annotationPayload = annotationPayload[0];
-          }
-          const imageFile = resolveImageFileForAnnotation(annotationPayload, annotationFile, imageIndex);
-          if (!imageFile) {
-            failed.push(`${annotationFile.name}: 找不到对应图片`);
-            continue;
-          }
-          const imageCacheKey = imageFile.webkitRelativePath || imageFile.name;
-          let imageDataUrl = imageDataUrlCache.get(imageCacheKey);
-          if (!imageDataUrl) {
-            imageDataUrl = await readFileAsDataUrl(imageFile);
-            imageDataUrlCache.set(imageCacheKey, imageDataUrl);
-          }
-          pendingImports.push({
-            image_file_name: imageFile.name,
-            image_data_url: imageDataUrl,
-            annotation_file_name: annotationFile.name,
-            annotation_text: annotationText,
-            import_session_id: copyId,
-            import_session_label: `副本: ${copyId}`,
-            image_set_id: copyId,
-            image_set_label: copyId,
-            annotation_state_id: copyId,
-            annotation_state_label: copyId,
-            image_relative_path: imageFile.webkitRelativePath || imageFile.name,
-            annotation_relative_path: annotationFile.webkitRelativePath || annotationFile.name,
-          });
-          if (pendingImports.length >= IMPORT_BATCH_SIZE) {
-            await flushPendingImports();
-          }
-        } catch (error) {
-          failed.push(`${annotationFile.name}: ${error.message || error}`);
-        }
-      }
-
-      await flushPendingImports();
-      return {
-        ok: !failed.length,
-        import_id: copyId,
-        image_set_id: copyId,
-        annotation_state_id: copyId,
-        targets: importedTargets,
-        errors: failed.map((error) => ({ error })),
-        restored_session_keys: Array.from(restoredSessionKeys),
-      };
     }
 
     async function openCurrentTarget() {

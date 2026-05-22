@@ -90,6 +90,12 @@ def create_handler(service, static_dir: Path):
                         service.import_run_copy(copy_id=payload.get("copy_id")),
                     )
 
+                if path == "/api/import-run-copy-path":
+                    return self._send_json(
+                        HTTPStatus.OK,
+                        service.import_external_run_copy(copy_root_path=payload.get("copy_root_path")),
+                    )
+
                 if path == "/api/import-run-copy/chunk":
                     return self._send_json(
                         HTTPStatus.OK,

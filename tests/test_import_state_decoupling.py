@@ -445,6 +445,29 @@ def test_import_existing_run_copy_restores_state_without_creating_new_copy(tmp_p
     assert len(manifest_payload["source_files"]) == 1
 
 
+def test_import_external_run_copy_uses_selected_folder_as_working_root(tmp_path):
+    store = UploadedTargetStore(tmp_path / "runs")
+    copy_root = tmp_path / "renamed_external_copy"
+    _write_png(copy_root / "images" / RUN_KEEP_DIR / "a.png")
+    state_payload = _state_payload()
+    state_payload["coco_file_name"] = "ann.json"
+    state_payload["coco_payload"] = _coco(101)
+    state_path = copy_root / "annotations" / RUN_KEEP_DIR / RUN_STATE_DIR / "a.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state_payload), encoding="utf-8")
+
+    imported = store.import_external_run_copy(str(copy_root))
+    target = imported["targets"][0]
+    manifest_payload = json.loads((copy_root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert imported["import_id"] == "renamed_external_copy"
+    assert Path(target["image_path"]).parent == copy_root / "images" / RUN_KEEP_DIR
+    assert Path(target["annotation_json_path"]).parent == copy_root / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR
+    assert manifest_payload["copy_root"] == str(copy_root.resolve())
+    assert (copy_root / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR / "ann.json").exists()
+    assert not (tmp_path / "runs" / "renamed_external_copy").exists()
+
+
 def test_import_existing_run_copy_corrects_conflicting_manifest_id(tmp_path):
     copy_root = tmp_path / "runs" / "copy_c"
     _write_png(copy_root / "images" / RUN_KEEP_DIR / "a.png")

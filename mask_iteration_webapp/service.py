@@ -403,10 +403,12 @@ class UploadedTargetStore:
         self._targets_by_key: dict[str, TargetRecord] = {}
         self._imports_by_id: dict[str, dict[str, Any]] = {}
         self._manifest_paths_by_id: dict[str, Path] = {}
+        self._run_copy_roots_by_id: dict[str, Path] = {}
         self._load_existing_manifests()
 
     def run_copy_root(self, copy_id: str | None) -> Path:
-        return self.runs_root / sanitize_component(str(copy_id or "dataset").strip() or "dataset")
+        normalized_copy_id = sanitize_component(str(copy_id or "dataset").strip() or "dataset")
+        return self._run_copy_roots_by_id.get(normalized_copy_id) or (self.runs_root / normalized_copy_id)
 
     def run_images_dir(self, copy_id: str | None, status: str = RUN_KEEP_DIR) -> Path:
         return self.run_copy_root(copy_id) / RUN_IMAGE_DIR / status
@@ -544,20 +546,35 @@ class UploadedTargetStore:
             raise ValueError("Run copy id is required.")
         normalized_copy_id = sanitize_component(raw_copy_id)
         copy_root = self.run_copy_root(normalized_copy_id).resolve()
-        runs_root = self.runs_root.resolve()
-        try:
-            copy_root.relative_to(runs_root)
-        except ValueError as error:
-            raise ValueError("Run copy path must stay inside the runs directory.") from error
+        if normalized_copy_id not in self._run_copy_roots_by_id:
+            runs_root = self.runs_root.resolve()
+            try:
+                copy_root.relative_to(runs_root)
+            except ValueError as error:
+                raise ValueError("Run copy path must stay inside the runs directory.") from error
         if not copy_root.exists() or not copy_root.is_dir():
             raise FileNotFoundError(f"Run copy not found: {normalized_copy_id}")
         return normalized_copy_id, copy_root
+
+    def register_external_run_copy_root(self, copy_root_path: str | Path) -> str:
+        raw_path = str(copy_root_path or "").strip().strip('"').strip("'")
+        if not raw_path:
+            raise ValueError("Run copy folder path is required.")
+        copy_root = Path(raw_path).expanduser().resolve()
+        if not copy_root.exists() or not copy_root.is_dir():
+            raise FileNotFoundError(f"Run copy folder not found: {copy_root}")
+        copy_id = sanitize_component(copy_root.name)
+        with self._lock:
+            self._run_copy_roots_by_id[copy_id] = copy_root
+        return copy_id
 
     def reset_run_copy(self, copy_id: str | None) -> str:
         raw_copy_id = str(copy_id or "").strip()
         if not raw_copy_id:
             raise ValueError("Run copy id is required.")
         normalized_copy_id = sanitize_component(raw_copy_id)
+        if normalized_copy_id in self._run_copy_roots_by_id:
+            raise ValueError("Refusing to reset an external run copy folder.")
         copy_root = self.run_copy_root(normalized_copy_id).resolve()
         runs_root = self.runs_root.resolve()
         try:
@@ -1535,6 +1552,10 @@ class UploadedTargetStore:
         response_payload["errors"] = errors
         response_payload["ok"] = not errors
         return response_payload
+
+    def import_external_run_copy(self, copy_root_path: str | Path) -> dict[str, Any]:
+        copy_id = self.register_external_run_copy_root(copy_root_path)
+        return self.import_run_copy(copy_id)
 
     def import_run_copy_chunk(self, copy_id: str | None, offset: int = 0, limit: int = 16) -> dict[str, Any]:
         copy_id, copy_root = self._require_existing_run_copy_root(copy_id)
@@ -4404,6 +4425,15 @@ class MaskIterationService:
     def import_run_copy(self, copy_id: str | None) -> dict[str, Any]:
         self._reset_session_cache_for_import(str(copy_id or "run_copy"))
         manifest = self.target_store.import_run_copy(copy_id)
+        response = self._prepare_import_response(manifest)
+        response["errors"] = manifest.get("errors") or []
+        response["ok"] = not response["errors"]
+        return response
+
+    def import_external_run_copy(self, copy_root_path: str | Path) -> dict[str, Any]:
+        copy_id = sanitize_component(Path(str(copy_root_path or "")).expanduser().name or "run_copy")
+        self._reset_session_cache_for_import(copy_id)
+        manifest = self.target_store.import_external_run_copy(copy_root_path)
         response = self._prepare_import_response(manifest)
         response["errors"] = manifest.get("errors") or []
         response["ok"] = not response["errors"]
