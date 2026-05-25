@@ -11,6 +11,40 @@ from sam3.model.data_misc import FindStage, interpolate
 from torchvision.transforms import v2
 
 
+class _ToDtypeCompat:
+    def __init__(self, dtype, scale=False):
+        self.dtype = dtype
+        self.scale = bool(scale)
+
+    def __call__(self, image):
+        if hasattr(v2.functional, "to_dtype"):
+            try:
+                return v2.functional.to_dtype(image, self.dtype, scale=self.scale)
+            except TypeError:
+                pass
+
+        source_dtype = getattr(image, "dtype", None)
+        converted = image.to(self.dtype)
+        if not self.scale:
+            return converted
+        if torch.is_floating_point(converted):
+            if source_dtype == torch.uint8:
+                return converted / 255.0
+            return converted
+        if source_dtype is not None and torch.is_floating_point(image):
+            return (image * 255.0).round().clamp(0, 255).to(self.dtype)
+        return converted
+
+
+def _to_dtype(dtype, scale=False):
+    try:
+        return v2.ToDtype(dtype, scale=scale)
+    except TypeError as error:
+        if "scale" not in str(error):
+            raise
+        return _ToDtypeCompat(dtype, scale=scale)
+
+
 class Sam3Processor:
     """ """
 
@@ -20,9 +54,9 @@ class Sam3Processor:
         self.device = device
         self.transform = v2.Compose(
             [
-                v2.ToDtype(torch.uint8, scale=True),
+                _to_dtype(torch.uint8, scale=True),
                 v2.Resize(size=(resolution, resolution)),
-                v2.ToDtype(torch.float32, scale=True),
+                _to_dtype(torch.float32, scale=True),
                 v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
             ]
         )

@@ -34,7 +34,7 @@ from .models import (
     copy_locked_regions,
     copy_line_strokes,
     copy_points,
-    drop_system_prompt_points,
+    drop_generated_iteration_prompt_points,
     utc_now_iso,
 )
 
@@ -60,6 +60,7 @@ TARGET_STATUS_WRONG = "wrong"
 TARGET_STATUS_DIFFICULT = "difficult"
 TARGET_STATUSES = {TARGET_STATUS_KEEP, TARGET_STATUS_DELETE, TARGET_STATUS_WRONG, TARGET_STATUS_DIFFICULT}
 TARGET_QUALITY_STATUSES = {TARGET_STATUS_WRONG, TARGET_STATUS_DIFFICULT}
+QUALITY_RECORDS_CSV = "quality_marked_targets.csv"
 MASK_SOURCE_COCO = "coco"
 MASK_SOURCE_STATE = "state"
 MASK_SOURCE_MODEL = "model"
@@ -403,12 +404,10 @@ class UploadedTargetStore:
         self._targets_by_key: dict[str, TargetRecord] = {}
         self._imports_by_id: dict[str, dict[str, Any]] = {}
         self._manifest_paths_by_id: dict[str, Path] = {}
-        self._run_copy_roots_by_id: dict[str, Path] = {}
         self._load_existing_manifests()
 
     def run_copy_root(self, copy_id: str | None) -> Path:
-        normalized_copy_id = sanitize_component(str(copy_id or "dataset").strip() or "dataset")
-        return self._run_copy_roots_by_id.get(normalized_copy_id) or (self.runs_root / normalized_copy_id)
+        return self.runs_root / sanitize_component(str(copy_id or "dataset").strip() or "dataset")
 
     def run_images_dir(self, copy_id: str | None, status: str = RUN_KEEP_DIR) -> Path:
         return self.run_copy_root(copy_id) / RUN_IMAGE_DIR / status
@@ -546,35 +545,20 @@ class UploadedTargetStore:
             raise ValueError("Run copy id is required.")
         normalized_copy_id = sanitize_component(raw_copy_id)
         copy_root = self.run_copy_root(normalized_copy_id).resolve()
-        if normalized_copy_id not in self._run_copy_roots_by_id:
-            runs_root = self.runs_root.resolve()
-            try:
-                copy_root.relative_to(runs_root)
-            except ValueError as error:
-                raise ValueError("Run copy path must stay inside the runs directory.") from error
+        runs_root = self.runs_root.resolve()
+        try:
+            copy_root.relative_to(runs_root)
+        except ValueError as error:
+            raise ValueError("Run copy path must stay inside the runs directory.") from error
         if not copy_root.exists() or not copy_root.is_dir():
             raise FileNotFoundError(f"Run copy not found: {normalized_copy_id}")
         return normalized_copy_id, copy_root
-
-    def register_external_run_copy_root(self, copy_root_path: str | Path) -> str:
-        raw_path = str(copy_root_path or "").strip().strip('"').strip("'")
-        if not raw_path:
-            raise ValueError("Run copy folder path is required.")
-        copy_root = Path(raw_path).expanduser().resolve()
-        if not copy_root.exists() or not copy_root.is_dir():
-            raise FileNotFoundError(f"Run copy folder not found: {copy_root}")
-        copy_id = sanitize_component(copy_root.name)
-        with self._lock:
-            self._run_copy_roots_by_id[copy_id] = copy_root
-        return copy_id
 
     def reset_run_copy(self, copy_id: str | None) -> str:
         raw_copy_id = str(copy_id or "").strip()
         if not raw_copy_id:
             raise ValueError("Run copy id is required.")
         normalized_copy_id = sanitize_component(raw_copy_id)
-        if normalized_copy_id in self._run_copy_roots_by_id:
-            raise ValueError("Refusing to reset an external run copy folder.")
         copy_root = self.run_copy_root(normalized_copy_id).resolve()
         runs_root = self.runs_root.resolve()
         try:
@@ -596,8 +580,36 @@ class UploadedTargetStore:
                     self._targets_by_key.pop(target_key, None)
             self._manifest_paths_by_id.pop(normalized_copy_id, None)
             if copy_root.exists():
-                shutil.rmtree(copy_root)
+                for child in copy_root.iterdir():
+                    if child.is_file() and child.name == QUALITY_RECORDS_CSV:
+                        continue
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
         return normalized_copy_id
+
+    def forget_import_manifest(self, import_id: str | None, remove_manifest_file: bool = True) -> str:
+        raw_import_id = str(import_id or "").strip()
+        if not raw_import_id:
+            raise ValueError("Import id is required.")
+        normalized_import_id = sanitize_component(raw_import_id)
+        manifest_path = self._manifest_path(normalized_import_id)
+        with self._lock:
+            previous_payload = self._imports_by_id.pop(normalized_import_id, {})
+            for target in previous_payload.get("targets", []) or []:
+                if isinstance(target, TargetRecord):
+                    self._targets_by_key.pop(target.key, None)
+                elif isinstance(target, dict):
+                    self._targets_by_key.pop(str(target.get("key") or ""), None)
+            for target_key, target in list(self._targets_by_key.items()):
+                if target.import_id == normalized_import_id:
+                    self._targets_by_key.pop(target_key, None)
+            self._manifest_paths_by_id.pop(normalized_import_id, None)
+        if remove_manifest_file and manifest_path.exists():
+            with contextlib.suppress(Exception):
+                manifest_path.unlink()
+        return normalized_import_id
 
     @staticmethod
     def _relative_path_text(path: Path, root: Path) -> str:
@@ -1552,10 +1564,6 @@ class UploadedTargetStore:
         response_payload["errors"] = errors
         response_payload["ok"] = not errors
         return response_payload
-
-    def import_external_run_copy(self, copy_root_path: str | Path) -> dict[str, Any]:
-        copy_id = self.register_external_run_copy_root(copy_root_path)
-        return self.import_run_copy(copy_id)
 
     def import_run_copy_chunk(self, copy_id: str | None, offset: int = 0, limit: int = 16) -> dict[str, Any]:
         copy_id, copy_root = self._require_existing_run_copy_root(copy_id)
@@ -3370,7 +3378,7 @@ class MaskIterationService:
         gc.collect()
 
     def _quality_records_csv_path(self, import_id: str | None) -> Path:
-        return self.target_store.run_copy_root(import_id) / "quality_marked_targets.csv"
+        return self.target_store.run_copy_root(import_id) / QUALITY_RECORDS_CSV
 
     def _append_quality_target_record(
         self,
@@ -4159,7 +4167,7 @@ class MaskIterationService:
             mask_area=int(mask_bool.sum()),
             mask_bbox_xywh=self.inference_service._mask_to_xywh(mask_bool),
             prompt_box_xyxy=deepcopy(session.prompt_box_xyxy),
-            manual_points_snapshot=drop_system_prompt_points(copy_points(session.working_points)),
+            manual_points_snapshot=drop_generated_iteration_prompt_points(copy_points(session.working_points)),
             line_strokes_snapshot=copy_line_strokes(session.line_strokes),
             locked_regions_snapshot=copy_locked_regions(session.locked_regions),
             system_prompt_points=copy_points(session.system_prompt_points),
@@ -4311,6 +4319,13 @@ class MaskIterationService:
             self._mark_session_mask_source(session_payload, MASK_SOURCE_STATE, saved_at=manifest.get("imported_at"))
             restored_session = SessionState.from_dict(session_payload)
             self._save_session_outputs(restored_session)
+            if restored_session.target_status in TARGET_QUALITY_STATUSES:
+                self._append_quality_target_record(
+                    restored_session,
+                    restored_session.target_status,
+                    restored_session.updated_at or utc_now_iso(),
+                    reason=f"restored_{restored_session.target_status}",
+                )
             restored_session_keys.append(restored_session.session_id)
         for item in target_items:
             target = TargetRecord.from_dict(item)
@@ -4384,7 +4399,12 @@ class MaskIterationService:
         )
         return self._prepare_import_response(manifest)
 
-    def import_targets_batch(self, items: Any, reset_import_id: str | None = None) -> dict[str, Any]:
+    def import_targets_batch(
+        self,
+        items: Any,
+        reset_import_id: str | None = None,
+        replace_import_id: str | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(items, list) or not items:
             raise ValueError("Batch import requires a non-empty items list.")
         first_item = items[0] if isinstance(items[0], dict) else {}
@@ -4396,6 +4416,9 @@ class MaskIterationService:
         )
         if reset_import_id:
             import_id = self.target_store.reset_run_copy(reset_import_id)
+            self._cleared_import_ids.discard(sanitize_component(str(import_id)))
+        elif replace_import_id:
+            import_id = self.target_store.forget_import_manifest(replace_import_id)
             self._cleared_import_ids.discard(sanitize_component(str(import_id)))
         self._reset_session_cache_for_import(str(import_id))
         batch = self.target_store.import_bundles(items)
@@ -4425,15 +4448,6 @@ class MaskIterationService:
     def import_run_copy(self, copy_id: str | None) -> dict[str, Any]:
         self._reset_session_cache_for_import(str(copy_id or "run_copy"))
         manifest = self.target_store.import_run_copy(copy_id)
-        response = self._prepare_import_response(manifest)
-        response["errors"] = manifest.get("errors") or []
-        response["ok"] = not response["errors"]
-        return response
-
-    def import_external_run_copy(self, copy_root_path: str | Path) -> dict[str, Any]:
-        copy_id = sanitize_component(Path(str(copy_root_path or "")).expanduser().name or "run_copy")
-        self._reset_session_cache_for_import(copy_id)
-        manifest = self.target_store.import_external_run_copy(copy_root_path)
         response = self._prepare_import_response(manifest)
         response["errors"] = manifest.get("errors") or []
         response["ok"] = not response["errors"]
@@ -4944,7 +4958,7 @@ class MaskIterationService:
                 session.text_prompt = str(text_prompt or "").strip()
             if line_strokes is not None:
                 session.line_strokes = self._normalize_line_strokes(session, line_strokes)
-            session.working_points = drop_system_prompt_points(session.working_points)
+            session.working_points = drop_generated_iteration_prompt_points(session.working_points)
             current = session.current_history()
             previous_logits = self._ensure_history_logits(session, current)
             effective_points = copy_points(session.working_points)
@@ -4990,7 +5004,7 @@ class MaskIterationService:
             session = self._require_session(target_key)
             history_item = session.history_by_id(history_id)
             session.current_history_id = history_item.history_id
-            session.working_points = drop_system_prompt_points(copy_points(history_item.manual_points_snapshot))
+            session.working_points = drop_generated_iteration_prompt_points(copy_points(history_item.manual_points_snapshot))
             session.line_strokes = copy_line_strokes(history_item.line_strokes_snapshot)
             session.locked_regions = copy_locked_regions(history_item.locked_regions_snapshot)
             session.text_prompt = history_item.text_prompt
@@ -5021,7 +5035,7 @@ class MaskIterationService:
             if session.current_history_id in delete_ids:
                 fallback = session.history[-1]
                 session.current_history_id = fallback.history_id
-                session.working_points = drop_system_prompt_points(copy_points(fallback.manual_points_snapshot))
+                session.working_points = drop_generated_iteration_prompt_points(copy_points(fallback.manual_points_snapshot))
                 session.line_strokes = copy_line_strokes(fallback.line_strokes_snapshot)
                 session.locked_regions = copy_locked_regions(fallback.locked_regions_snapshot)
                 session.text_prompt = fallback.text_prompt

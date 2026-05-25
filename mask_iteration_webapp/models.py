@@ -19,8 +19,18 @@ def is_system_prompt_point(point: "PointRecord") -> bool:
     return source == "system" or point_id.startswith("system_") or "system_center" in point_id
 
 
+def is_generated_iteration_prompt_point(point: "PointRecord") -> bool:
+    source = str(point.source or "").strip().lower()
+    point_id = str(point.point_id or "").strip().lower()
+    return is_system_prompt_point(point) or source == "category" or point_id.startswith("initial_category_prompt_")
+
+
 def drop_system_prompt_points(points: list["PointRecord"]) -> list["PointRecord"]:
     return [point for point in points if not is_system_prompt_point(point)]
+
+
+def drop_generated_iteration_prompt_points(points: list["PointRecord"]) -> list["PointRecord"]:
+    return [point for point in points if not is_generated_iteration_prompt_point(point)]
 
 
 def copy_line_strokes(strokes: list["LineStrokeRecord"]) -> list["LineStrokeRecord"]:
@@ -197,7 +207,7 @@ class HistoryRecord:
             mask_area=int(payload.get("mask_area", 0)),
             mask_bbox_xywh=payload.get("mask_bbox_xywh"),
             prompt_box_xyxy=[float(value) for value in payload["prompt_box_xyxy"]],
-            manual_points_snapshot=drop_system_prompt_points(
+            manual_points_snapshot=drop_generated_iteration_prompt_points(
                 [PointRecord.from_dict(item) for item in payload.get("manual_points_snapshot", [])]
             ),
             line_strokes_snapshot=[
@@ -288,7 +298,7 @@ class SessionState:
             system_prompt_points=drop_system_prompt_points(
                 [PointRecord.from_dict(item) for item in payload.get("system_prompt_points", [])]
             ),
-            working_points=drop_system_prompt_points(
+            working_points=drop_generated_iteration_prompt_points(
                 [PointRecord.from_dict(item) for item in payload.get("working_points", [])]
             ),
             line_strokes=[LineStrokeRecord.from_dict(item) for item in payload.get("line_strokes", [])],

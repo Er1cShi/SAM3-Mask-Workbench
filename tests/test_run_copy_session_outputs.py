@@ -347,6 +347,48 @@ def test_mark_difficult_unsaved_target_records_quality_and_autosaves_state(tmp_p
     assert "hard edge" in quality_text
 
 
+@pytest.mark.parametrize(
+    ("status", "mark"),
+    [
+        ("wrong", lambda service: service.mark_wrong_target("target_a")),
+        ("difficult", lambda service: service.mark_difficult_target("target_a", reason="hard edge")),
+    ],
+)
+def test_quality_marked_target_reimports_with_status_and_csv(tmp_path, status, mark):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
+    target = _target(tmp_path)
+    Image.new("RGB", (4, 4), "white").save(Path(target.image_path))
+    target_store._targets_by_key[target.key] = target
+    service._save_session_outputs(_session(target, current_history_id="iter1"))
+
+    mark(service)
+
+    quality_csv = tmp_path / "runs" / "copy_a" / "quality_marked_targets.csv"
+    assert quality_csv.exists()
+    assert status in quality_csv.read_text(encoding="utf-8")
+    quality_csv.unlink()
+
+    reimported_service = MaskIterationService(
+        UploadedTargetStore(tmp_path / "runs"),
+        SessionStore(tmp_path / "sessions_reimport"),
+        DummyInference(),
+    )
+    payload = reimported_service.import_run_copy("copy_a")
+
+    assert payload["ok"] is True
+    assert len(payload["targets"]) == 1
+    assert payload["targets"][0]["target_status"] == status
+    assert payload["targets"][0]["is_deleted"] is False
+    restored_session = reimported_service.session_store.load_session(payload["targets"][0]["key"])
+    assert restored_session is not None
+    assert restored_session.target_status == status
+    assert quality_csv.exists()
+    restored_quality_text = quality_csv.read_text(encoding="utf-8")
+    assert status in restored_quality_text
+    assert f"restored_{status}" in restored_quality_text
+
+
 def test_fresh_coco_import_does_not_restore_existing_session_by_identity(tmp_path):
     target_store = UploadedTargetStore(tmp_path / "runs")
     session_store = SessionStore(tmp_path / "sessions")

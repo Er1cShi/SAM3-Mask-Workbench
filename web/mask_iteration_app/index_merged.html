@@ -220,6 +220,33 @@
       background: var(--amber-soft);
       color: var(--amber);
     }
+    .prompt-status-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 84px;
+      gap: 6px;
+      align-items: stretch;
+    }
+    .target-status-button {
+      min-height: 38px;
+      cursor: default;
+      pointer-events: none;
+      font-weight: 800;
+    }
+    .target-status-button.status-normal {
+      border-color: rgba(42, 147, 82, 0.5);
+      background: rgba(230, 247, 236, 0.95);
+      color: #1f7a43;
+    }
+    .target-status-button.status-difficult {
+      border-color: rgba(183, 106, 18, 0.55);
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+    .target-status-button.status-wrong {
+      border-color: rgba(200, 53, 43, 0.55);
+      background: var(--red-soft);
+      color: var(--red);
+    }
     .layout {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 356px;
@@ -805,8 +832,8 @@
                   <button id="importBtn" class="import-export-action" type="button">导入文件夹</button>
                   <div class="import-export-row">
                     <div class="field">
-                      <label for="runCopyPathInput">导入当前副本文件夹路径</label>
-                      <input id="runCopyPathInput" type="text" placeholder="C:\path\to\copy_folder">
+                      <label for="runCopyFolderUpload">导入已有副本文件夹</label>
+                      <input id="runCopyFolderUpload" type="file" webkitdirectory directory multiple accept=".json,application/json,.jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp,image/bmp">
                     </div>
                   </div>
                   <button id="importRunCopyBtn" class="import-export-action" type="button">导入当前副本</button>
@@ -870,11 +897,14 @@
 
         <div class="field span-5">
           <label for="textPromptInput">文字 Prompt</label>
+          <div class="prompt-status-row">
           <textarea
             id="textPromptInput"
             class="prompt-input"
             placeholder="框是必选 prompt。这里可以补充文字描述，例如：black office chair with armrest"
           ></textarea>
+          <button id="targetStatusBtn" class="target-status-button status-normal" type="button" tabindex="-1">正常</button>
+          </div>
           <div class="subtle">框、点、线和文字会一起参与当前迭代。</div>
         </div>
       </div>
@@ -1054,7 +1084,7 @@
     const el = {
       imageFolderUpload: document.getElementById("imageFolderUpload"),
       annotationFolderUpload: document.getElementById("annotationFolderUpload"),
-      runCopyPathInput: document.getElementById("runCopyPathInput"),
+      runCopyFolderUpload: document.getElementById("runCopyFolderUpload"),
       annotationStateNameInput: document.getElementById("annotationStateNameInput"),
       exportDatasetNameInput: document.getElementById("exportDatasetNameInput"),
       exportPathDisplayInput: document.getElementById("exportPathDisplayInput"),
@@ -1089,6 +1119,7 @@
       commitRegionBtn: document.getElementById("commitRegionBtn"),
       cancelRegionBtn: document.getElementById("cancelRegionBtn"),
       textPromptInput: document.getElementById("textPromptInput"),
+      targetStatusBtn: document.getElementById("targetStatusBtn"),
       iterateBtn: document.getElementById("iterateBtn"),
       saveCurrentMaskBtn: document.getElementById("saveCurrentMaskBtn"),
       maskSourceSummary: document.getElementById("maskSourceSummary"),
@@ -1124,6 +1155,8 @@
     const COLORS = {
       currentMask: [0, 194, 255],
       restoredMask: [48, 208, 127],
+      difficultMask: [255, 211, 64],
+      errorMask: [255, 106, 89],
       compareMask: [255, 79, 143],
       bbox: [64, 223, 133],
       promptBox: [99, 210, 255],
@@ -1432,7 +1465,48 @@
 
     function isQueueTarget(target) {
       const status = String(target && target.target_status || "keep").toLowerCase();
-      return !["delete", "wrong", "difficult"].includes(status);
+      return status !== "delete" && !Boolean(target && target.is_deleted);
+    }
+
+    function updateQueuedTargetStatus(targetKey, status) {
+      const target = state.targets.find((item) => item.key === targetKey);
+      if (!target) return;
+      target.target_status = status || "keep";
+      target.is_deleted = status === "delete";
+      target.deleted_at = target.is_deleted ? (target.deleted_at || new Date().toISOString()) : null;
+    }
+
+    function currentTargetStatus() {
+      const status = currentTargetStatusKey();
+      if (status === "wrong") {
+        return { key: "wrong", label: "错误框", className: "status-wrong" };
+      }
+      if (status === "difficult") {
+        return { key: "difficult", label: "难处理", className: "status-difficult" };
+      }
+      return { key: "keep", label: "正常", className: "status-normal" };
+    }
+
+    function currentTargetStatusKey() {
+      const status = String(
+        (state.session && state.session.target_status)
+        || (state.session && state.session.is_deleted ? "delete" : "")
+        || (getCurrentTarget() && getCurrentTarget().target_status)
+        || "keep"
+      ).toLowerCase();
+      if (status === "delete" || status === "wrong" || status === "difficult") {
+        return status;
+      }
+      return "keep";
+    }
+
+    function renderTargetStatusButton() {
+      if (!el.targetStatusBtn) return;
+      const status = currentTargetStatus();
+      el.targetStatusBtn.textContent = status.label;
+      el.targetStatusBtn.title = `当前框状态：${status.label}`;
+      el.targetStatusBtn.classList.remove("status-normal", "status-difficult", "status-wrong");
+      el.targetStatusBtn.classList.add(status.className);
     }
 
     function recordRestoredSessions(payload) {
@@ -1623,6 +1697,28 @@
     function isEncodedMaskSource(source) {
       const normalized = normalizeMaskSource(source);
       return normalized === "state" || normalized === "coco";
+    }
+
+    function resolveCurrentMaskColor(current) {
+      if (!current || !state.session) {
+        return COLORS.currentMask;
+      }
+      const restoredHistoryId = state.restoredMaskHistoryByTarget.get(state.session.session_id);
+      const isEncodedCurrentMask = (
+        isEncodedMaskSource(current.mask_source || state.session.current_mask_source)
+        || (restoredHistoryId && current.history_id === restoredHistoryId)
+      );
+      if (!isEncodedCurrentMask) {
+        return COLORS.currentMask;
+      }
+      const status = currentTargetStatusKey();
+      if (status === "difficult") {
+        return COLORS.difficultMask;
+      }
+      if (status === "delete" || status === "wrong") {
+        return COLORS.errorMask;
+      }
+      return COLORS.restoredMask;
     }
 
     function renderMaskSourceStatus() {
@@ -2718,12 +2814,8 @@
       }
       if (current) {
         const decoded = decodeSimpleRLE(current.mask_rle, current.history_id);
-        const restoredHistoryId = state.session ? state.restoredMaskHistoryByTarget.get(state.session.session_id) : null;
-        const maskColor = isEncodedMaskSource(current.mask_source || state.session.current_mask_source) || (restoredHistoryId && current.history_id === restoredHistoryId)
-          ? COLORS.restoredMask
-          : COLORS.currentMask;
         ctx.drawImage(
-          buildMaskOverlayCanvas(decoded, crop, maskColor, Number(el.maskOpacity.value)),
+          buildMaskOverlayCanvas(decoded, crop, resolveCurrentMaskColor(current), Number(el.maskOpacity.value)),
           0,
           0
         );
@@ -2759,6 +2851,7 @@
       renderSourceSummary();
       renderWorkflowStatus();
       renderButtons();
+      renderTargetStatusButton();
       renderMeta();
       renderPointList();
       renderStrokeList();
@@ -3243,94 +3336,6 @@
       }
     }
 
-    async function importCurrentFolders() {
-      const imageFiles = Array.from((el.imageFolderUpload.files || []));
-      const annotationFiles = selectAnnotationFiles(Array.from((el.annotationFolderUpload.files || [])));
-
-      if (!imageFiles.length) {
-        setStatus("请先选择图片文件夹。", true);
-        return;
-      }
-      if (!annotationFiles.length) {
-        setStatus("请先选择标注文件夹。", true);
-        return;
-      }
-      try {
-        const imageIndex = buildImageFileIndex(imageFiles);
-        if (!imageIndex.imagesByBaseName.size) {
-          throw new Error("图片文件夹里没有找到图片文件。");
-        }
-
-        const importedTargets = [];
-        const skipped = [];
-        const imageFolderLabel = getSelectedFolderLabel(imageFiles) || "图片文件夹";
-        const annotationFolderLabel = getSelectedFolderLabel(annotationFiles) || "标注文件夹";
-        const imageSetLabel = (imageFolderLabel || "图片文件夹").trim();
-        const annotationStateLabel = (el.annotationStateNameInput.value || annotationFolderLabel || "标注文件夹").trim();
-        const copyId = resolveCurrentCopyId(imageSetLabel);
-        const imageSetId = copyId;
-        const annotationStateId = copyId;
-        const importSessionId = copyId;
-        const importSessionLabel = `图片: ${imageSetLabel} | 标注状态: ${annotationStateLabel}`;
-
-        for (let index = 0; index < annotationFiles.length; index += 1) {
-          const annotationFile = annotationFiles[index];
-          setBusy(`Importing ${index + 1} / ${annotationFiles.length}...`);
-          const annotationText = await readFileAsText(annotationFile);
-          let annotationPayload = JSON.parse(annotationText);
-          if (Array.isArray(annotationPayload)) {
-            if (annotationPayload.length !== 1 || typeof annotationPayload[0] !== "object") {
-              skipped.push(`${annotationFile.name}: JSON 顶层不是单图对象`);
-              continue;
-            }
-            annotationPayload = annotationPayload[0];
-          }
-          const imageFile = resolveImageFileForAnnotation(annotationPayload, annotationFile, imageIndex);
-          if (!imageFile) {
-            skipped.push(`${annotationFile.name}: 找不到对应图片`);
-            continue;
-          }
-          const imageDataUrl = await readFileAsDataUrl(imageFile);
-          const payload = await apiPost("/api/import-targets", {
-            image_file_name: imageFile.name,
-            image_data_url: imageDataUrl,
-            annotation_file_name: annotationFile.name,
-            annotation_text: annotationText,
-            import_session_id: importSessionId,
-            import_session_label: importSessionLabel,
-            image_set_id: imageSetId,
-            image_set_label: imageSetLabel,
-            annotation_state_id: annotationStateId,
-            annotation_state_label: annotationStateLabel,
-            image_relative_path: imageFile.webkitRelativePath || imageFile.name,
-            annotation_relative_path: annotationFile.webkitRelativePath || annotationFile.name,
-          });
-          importedTargets.push(...(payload.targets || []));
-          recordRestoredSessions(payload);
-        }
-
-        if (!importedTargets.length) {
-          throw new Error(skipped.length ? skipped.join("；") : "没有成功导入任何目标。");
-        }
-
-        state.currentImageSetId = imageSetId;
-        state.currentAnnotationStateId = annotationStateId;
-        applyTargets(
-          importedTargets,
-          `图片: ${imageSetLabel} | 标注状态: ${annotationStateLabel} | ${annotationFiles.length} 个标注文件`
-        );
-        const summary = skipped.length
-          ? `Imported ${importedTargets.length} targets. Skipped ${skipped.length} annotation files.`
-          : `Imported ${importedTargets.length} targets from the selected folders.`;
-        clearBusy(summary);
-        await openCurrentTarget();
-      } catch (error) {
-        state.busy = false;
-        renderButtons();
-        setStatus(error.message || String(error), true);
-      }
-    }
-
     async function importCurrentFoldersSafe() {
       const imageFiles = Array.from((el.imageFolderUpload.files || []));
       const annotationFiles = selectAnnotationFiles(Array.from((el.annotationFolderUpload.files || [])));
@@ -3483,17 +3488,16 @@
     }
 
     async function importRunCopyFolder() {
-      const copyRootPath = (el.runCopyPathInput.value || "").trim();
+      const runCopyFiles = Array.from((el.runCopyFolderUpload.files || []));
       try {
-        if (!copyRootPath) {
-          throw new Error("请填写要直接读取和改写的副本文件夹路径。");
-        }
-        setBusy(`正在导入当前副本: ${copyRootPath}`);
-        const payload = await apiPost(
-          "/api/import-run-copy-path",
-          { copy_root_path: copyRootPath },
-          { timeoutMs: 90000 }
-        );
+        const selection = detectRunCopyFolder(runCopyFiles);
+        const selectedAnnotationCount = selection.keptStateCount && (!selection.keptCocoCount || selection.keptStateCount >= selection.keptCocoCount)
+          ? selection.keptStateCount
+          : selection.keptCocoCount;
+        const totalFiles = Math.max(1, selectedAnnotationCount);
+        setBusy(`正在导入已有副本 ${selection.copyId}: 0 / ${totalFiles}`);
+        setImportProgress(0, totalFiles, `0 / ${totalFiles}`);
+        const payload = await importRunCopyFolderViaBatch(runCopyFiles, selection);
         const importedTargets = payload.targets || [];
         if (!importedTargets.length) {
           throw new Error("这个副本里没有可导入的保留目标。");
@@ -3503,14 +3507,15 @@
         }
         recordRestoredSessions(payload);
 
-        state.currentImageSetId = payload.image_set_id || payload.import_id || "";
-        state.currentAnnotationStateId = payload.annotation_state_id || payload.import_id || "";
+        state.currentImageSetId = payload.image_set_id || selection.copyId;
+        state.currentAnnotationStateId = payload.annotation_state_id || selection.copyId;
         applyTargets(
           importedTargets,
-          `当前副本: ${copyRootPath}`
+          `副本: ${selection.copyId} | 图片 ${selection.keptImageCount} | state ${selection.keptStateCount} | coco ${selection.keptCocoCount}`
         );
 
-        clearBusy(`Imported ${importedTargets.length} targets from current copy.`);
+        const parts = [`Imported ${importedTargets.length} targets from existing copy ${selection.copyId}.`];
+        clearBusy(parts.join(" "));
         await openCurrentTarget();
       } catch (error) {
         state.busy = false;
@@ -3518,6 +3523,116 @@
         renderButtons();
         setStatus(error.message || String(error), true);
       }
+    }
+
+    async function importRunCopyFolderViaBatch(runCopyFiles, selection) {
+      const files = splitRunCopyFiles(runCopyFiles, selection);
+      if (!files.images.length) {
+        throw new Error("这个副本缺少 images/keep 下的图片。");
+      }
+      if (!files.annotations.length) {
+        throw new Error("这个副本缺少 annotations/keep/state 或 annotations/keep/coco 下的标注。");
+      }
+
+      const imageIndex = buildImageFileIndex(files.images);
+      const importedTargets = [];
+      const failed = [];
+      const restoredSessionKeys = new Set();
+      let pendingImports = [];
+      const imageDataUrlCache = new Map();
+      let uploadedImportCount = 0;
+      let batchIndex = 0;
+      let didReplaceRunCopy = false;
+      const copyId = selection.copyId;
+      const flushPendingImports = async () => {
+        while (pendingImports.length) {
+          batchIndex += 1;
+          const chunk = pendingImports.splice(0, IMPORT_BATCH_SIZE);
+          const start = uploadedImportCount + 1;
+          const end = uploadedImportCount + chunk.length;
+          setBusy(`Uploading run copy ${start}-${end} / ${files.annotations.length}...`);
+          setImportProgress(start - 1, files.annotations.length, `${start - 1} / ${files.annotations.length}`);
+          try {
+            const requestPayload = { items: chunk };
+            if (!didReplaceRunCopy) {
+              requestPayload.replace_import_id = copyId;
+            }
+            const payload = await apiPost("/api/import-targets/batch", requestPayload, { timeoutMs: 90000 });
+            if (requestPayload.replace_import_id) {
+              didReplaceRunCopy = true;
+            }
+            importedTargets.push(...(payload.targets || []));
+            for (const key of payload.restored_session_keys || []) {
+              restoredSessionKeys.add(String(key));
+            }
+            for (const item of (payload.errors || [])) {
+              failed.push(`${item.annotation_file_name || "annotation"}: ${item.error || "import failed"}`);
+            }
+          } catch (error) {
+            failed.push(`Batch ${batchIndex}: ${error.message || error}`);
+          } finally {
+            uploadedImportCount = end;
+            setImportProgress(uploadedImportCount, files.annotations.length, `${uploadedImportCount} / ${files.annotations.length}`);
+            imageDataUrlCache.clear();
+          }
+        }
+      };
+
+      for (let index = 0; index < files.annotations.length; index += 1) {
+        const annotationFile = files.annotations[index];
+        const fileLabel = annotationFile.webkitRelativePath || annotationFile.name;
+        setBusy(`正在导入副本 ${index + 1} / ${files.annotations.length}: ${fileLabel}`);
+        setImportProgress(index, files.annotations.length, `${index} / ${files.annotations.length}`);
+        try {
+          const annotationText = await readFileAsText(annotationFile);
+          let annotationPayload = JSON.parse(annotationText);
+          if (Array.isArray(annotationPayload)) {
+            if (annotationPayload.length !== 1 || typeof annotationPayload[0] !== "object") {
+              failed.push(`${annotationFile.name}: JSON 顶层不是单图对象`);
+              continue;
+            }
+            annotationPayload = annotationPayload[0];
+          }
+          const imageFile = resolveImageFileForAnnotation(annotationPayload, annotationFile, imageIndex);
+          if (!imageFile) {
+            failed.push(`${annotationFile.name}: 找不到对应图片`);
+            continue;
+          }
+          const imageCacheKey = imageFile.webkitRelativePath || imageFile.name;
+          let imageDataUrl = imageDataUrlCache.get(imageCacheKey);
+          if (!imageDataUrl) {
+            imageDataUrl = await readFileAsDataUrl(imageFile);
+            imageDataUrlCache.set(imageCacheKey, imageDataUrl);
+          }
+          pendingImports.push({
+            image_file_name: imageFile.name,
+            image_data_url: imageDataUrl,
+            annotation_file_name: annotationFile.name,
+            annotation_text: annotationText,
+            import_session_id: copyId,
+            import_session_label: `副本: ${copyId}`,
+            image_set_id: copyId,
+            image_set_label: copyId,
+            annotation_state_id: copyId,
+            annotation_state_label: copyId,
+            image_relative_path: imageFile.webkitRelativePath || imageFile.name,
+            annotation_relative_path: annotationFile.webkitRelativePath || annotationFile.name,
+          });
+        } catch (error) {
+          failed.push(`${annotationFile.name}: ${error.message || error}`);
+        }
+      }
+
+      await flushPendingImports();
+      return {
+        ok: !failed.length,
+        import_id: copyId,
+        image_set_id: copyId,
+        annotation_state_id: copyId,
+        targets: importedTargets,
+        errors: failed.map((error) => ({ error })),
+        restored_session_keys: Array.from(restoredSessionKeys),
+      };
     }
 
     async function openCurrentTarget() {
@@ -3767,6 +3882,7 @@
           state.session.target_status = payload.target_status || "wrong";
           state.session.is_deleted = false;
           state.session.deleted_at = null;
+          updateQueuedTargetStatus(state.session.session_id, state.session.target_status);
         }
         renderAll();
         clearBusy("Current target marked wrong. You can keep segmenting this target.");
@@ -3794,6 +3910,7 @@
           state.session.target_status = payload.target_status || "difficult";
           state.session.is_deleted = false;
           state.session.deleted_at = null;
+          updateQueuedTargetStatus(state.session.session_id, state.session.target_status);
         }
         renderAll();
         clearBusy("Marked difficult target. You can keep segmenting this target.");

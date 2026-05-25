@@ -81,6 +81,7 @@ def create_handler(service, static_dir: Path):
                         service.import_targets_batch(
                             payload.get("items"),
                             reset_import_id=payload.get("reset_import_id"),
+                            replace_import_id=payload.get("replace_import_id"),
                         ),
                     )
 
@@ -88,12 +89,6 @@ def create_handler(service, static_dir: Path):
                     return self._send_json(
                         HTTPStatus.OK,
                         service.import_run_copy(copy_id=payload.get("copy_id")),
-                    )
-
-                if path == "/api/import-run-copy-path":
-                    return self._send_json(
-                        HTTPStatus.OK,
-                        service.import_external_run_copy(copy_root_path=payload.get("copy_root_path")),
                     )
 
                 if path == "/api/import-run-copy/chunk":

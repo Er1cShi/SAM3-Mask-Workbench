@@ -129,15 +129,50 @@ def test_batch_run_copy_import_reset_overwrites_existing_copy(tmp_path):
     first = service.import_targets_batch([item(101)], reset_import_id="external_copy")
     stale_path = tmp_path / "runs" / "external_copy" / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR / "stale.json"
     stale_path.write_text(json.dumps(_coco(999)), encoding="utf-8")
+    quality_csv = tmp_path / "runs" / "external_copy" / "quality_marked_targets.csv"
+    quality_csv.write_text("marked_at,status\n2026-01-01T00:00:00+00:00,wrong\n", encoding="utf-8")
 
     second = service.import_targets_batch([item(202, image_name="b.png")], reset_import_id="external_copy")
 
     assert first["targets"][0]["annotation_id"] == "101"
     assert second["targets"][0]["annotation_id"] == "202"
     assert not stale_path.exists()
+    assert quality_csv.exists()
+    assert "wrong" in quality_csv.read_text(encoding="utf-8")
     manifest = json.loads((tmp_path / "runs" / "external_copy" / "manifest.json").read_text(encoding="utf-8"))
     assert [item["annotation_id"] for item in manifest["targets"]] == ["202"]
     assert sorted(path.name for path in (tmp_path / "runs" / "external_copy" / "images" / RUN_KEEP_DIR).iterdir()) == ["b.png"]
+
+
+def test_batch_run_copy_import_replace_preserves_existing_files(tmp_path):
+    store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(store, SessionStore(tmp_path / "sessions"), object())
+    copy_root = tmp_path / "runs" / "external_copy"
+    stale_path = copy_root / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR / "stale.json"
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.write_text(json.dumps(_coco(999)), encoding="utf-8")
+    quality_csv = copy_root / "quality_marked_targets.csv"
+    quality_csv.write_text("marked_at,status\n2026-01-01T00:00:00+00:00,wrong\n", encoding="utf-8")
+
+    item = {
+        "image_file_name": "a.png",
+        "image_data_url": _png_data_url("white"),
+        "annotation_file_name": "ann.json",
+        "annotation_text": json.dumps(_coco(101)),
+        "import_session_id": "external_copy",
+        "image_set_id": "external_copy",
+        "annotation_state_id": "external_copy",
+        "image_relative_path": f"external_copy/images/{RUN_KEEP_DIR}/a.png",
+        "annotation_relative_path": f"external_copy/annotations/{RUN_KEEP_DIR}/{RUN_COCO_DIR}/ann.json",
+    }
+
+    imported = service.import_targets_batch([item], replace_import_id="external_copy")
+
+    assert imported["targets"][0]["annotation_id"] == "101"
+    assert stale_path.exists()
+    assert quality_csv.exists()
+    assert (copy_root / "images" / RUN_KEEP_DIR / "a.png").exists()
+    assert (copy_root / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR / "ann.json").exists()
 
 
 def test_original_direct_import_still_works_without_explicit_state(tmp_path):
@@ -443,29 +478,6 @@ def test_import_existing_run_copy_restores_state_without_creating_new_copy(tmp_p
     assert manifest_payload["import_id"] == "copy_a"
     assert len(manifest_payload["targets"]) == 1
     assert len(manifest_payload["source_files"]) == 1
-
-
-def test_import_external_run_copy_uses_selected_folder_as_working_root(tmp_path):
-    store = UploadedTargetStore(tmp_path / "runs")
-    copy_root = tmp_path / "renamed_external_copy"
-    _write_png(copy_root / "images" / RUN_KEEP_DIR / "a.png")
-    state_payload = _state_payload()
-    state_payload["coco_file_name"] = "ann.json"
-    state_payload["coco_payload"] = _coco(101)
-    state_path = copy_root / "annotations" / RUN_KEEP_DIR / RUN_STATE_DIR / "a.json"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state_payload), encoding="utf-8")
-
-    imported = store.import_external_run_copy(str(copy_root))
-    target = imported["targets"][0]
-    manifest_payload = json.loads((copy_root / "manifest.json").read_text(encoding="utf-8"))
-
-    assert imported["import_id"] == "renamed_external_copy"
-    assert Path(target["image_path"]).parent == copy_root / "images" / RUN_KEEP_DIR
-    assert Path(target["annotation_json_path"]).parent == copy_root / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR
-    assert manifest_payload["copy_root"] == str(copy_root.resolve())
-    assert (copy_root / "annotations" / RUN_KEEP_DIR / RUN_COCO_DIR / "ann.json").exists()
-    assert not (tmp_path / "runs" / "renamed_external_copy").exists()
 
 
 def test_import_existing_run_copy_corrects_conflicting_manifest_id(tmp_path):

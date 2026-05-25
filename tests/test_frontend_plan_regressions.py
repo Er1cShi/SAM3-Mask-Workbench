@@ -23,19 +23,84 @@ def test_special_toolbar_only_exposes_required_quality_actions():
     assert "删除整张图" not in html
 
 
-def test_run_copy_import_reads_real_folder_path_directly():
+def test_run_copy_import_uploads_selected_folder_instead_of_reading_runs_copy():
     html = _html()
 
     import_start = html.index("async function importRunCopyFolder()")
-    import_end = html.index("async function openCurrentTarget", import_start)
+    import_end = html.index("async function importRunCopyFolderViaBatch", import_start)
     import_body = html[import_start:import_end]
 
-    assert 'id="runCopyPathInput"' in html
-    assert '"/api/import-run-copy-path"' in import_body
-    assert "copy_root_path: copyRootPath" in import_body
-    assert "importRunCopyFolderViaBatch" not in import_body
-    assert "importRunCopyFolderViaServerChunks(selection)" not in import_body
-    assert "runCopyFolderUpload" not in html
+    assert "importRunCopyFolderViaBatch(runCopyFiles, selection)" in import_body
+    assert "importRunCopyFolderViaServerChunks" not in html
+    assert "compat mode" not in import_body
+    assert "fallback" not in import_body.lower()
+    assert 'id="runCopyFolderUpload" type="file" webkitdirectory directory multiple' in html
+    run_copy_input = html[html.index('id="runCopyFolderUpload"'):html.index(">", html.index('id="runCopyFolderUpload"'))]
+    assert ".json" in run_copy_input
+    assert ".png" in run_copy_input
+    assert ".csv" not in run_copy_input
+
+
+def test_run_copy_import_does_not_delete_selected_copy_folder():
+    html = _html()
+
+    import_start = html.index("async function importRunCopyFolderViaBatch")
+    import_end = html.index("async function openCurrentTarget", import_start)
+    import_body = html[import_start:import_end]
+    read_loop_start = import_body.index("for (let index = 0; index < files.annotations.length; index += 1)")
+    read_loop_body = import_body[
+        read_loop_start:import_body.index("await flushPendingImports();", read_loop_start)
+    ]
+
+    assert "await flushPendingImports();" not in read_loop_body
+    assert "requestPayload.replace_import_id = copyId" in import_body
+    assert "requestPayload.reset_import_id = copyId" not in import_body
+    assert "pendingImports.splice(0, IMPORT_BATCH_SIZE)" in import_body
+
+
+def test_quality_marked_targets_stay_in_queue():
+    html = _html()
+
+    queue_start = html.index("function isQueueTarget")
+    queue_end = html.index("function updateQueuedTargetStatus", queue_start)
+    queue_body = html[queue_start:queue_end]
+
+    assert 'status !== "delete"' in queue_body
+    assert '"wrong"' not in queue_body
+    assert '"difficult"' not in queue_body
+    assert "updateQueuedTargetStatus(state.session.session_id, state.session.target_status)" in html
+
+
+def test_text_prompt_has_current_target_status_button():
+    html = _html()
+
+    prompt_start = html.index('id="textPromptInput"')
+    prompt_section = html[prompt_start:html.index('<div class="subtle">', prompt_start)]
+
+    assert 'id="targetStatusBtn"' in prompt_section
+    assert "function renderTargetStatusButton" in html
+    assert "错误框" in html
+    assert "难处理" in html
+    assert "正常" in html
+    assert ".target-status-button.status-normal" in html
+    assert ".target-status-button.status-difficult" in html
+    assert ".target-status-button.status-wrong" in html
+
+
+def test_encoded_quality_mask_colors_do_not_affect_iteration_masks():
+    html = _html()
+
+    color_start = html.index("function resolveCurrentMaskColor")
+    color_body = html[color_start:html.index("function renderMaskSourceStatus", color_start)]
+
+    assert "difficultMask: [255, 211, 64]" in html
+    assert "errorMask: [255, 106, 89]" in html
+    assert 'status === "difficult"' in color_body
+    assert "return COLORS.difficultMask" in color_body
+    assert 'status === "delete" || status === "wrong"' in color_body
+    assert "return COLORS.errorMask" in color_body
+    assert "if (!isEncodedCurrentMask)" in color_body
+    assert "return COLORS.currentMask" in color_body
 
 
 def test_prompt_record_hover_highlights_canvas_items():

@@ -183,6 +183,14 @@ def test_loading_legacy_session_drops_system_center_points(tmp_path):
                 "label": 1,
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "source": "system",
+            },
+            {
+                "point_id": "initial_category_prompt_0",
+                "x": 4.5,
+                "y": 4.5,
+                "label": 1,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "source": "category",
             }
         ],
         "working_points": [
@@ -193,6 +201,14 @@ def test_loading_legacy_session_drops_system_center_points(tmp_path):
                 "label": 1,
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "source": "system",
+            },
+            {
+                "point_id": "initial_category_prompt_0",
+                "x": 4.5,
+                "y": 4.5,
+                "label": 1,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "source": "category",
             },
             {
                 "point_id": "manual_keep",
@@ -228,6 +244,14 @@ def test_loading_legacy_session_drops_system_center_points(tmp_path):
                         "source": "system",
                     },
                     {
+                        "point_id": "initial_category_prompt_0",
+                        "x": 4.5,
+                        "y": 4.5,
+                        "label": 1,
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "source": "category",
+                    },
+                    {
                         "point_id": "manual_keep",
                         "x": 5.0,
                         "y": 5.0,
@@ -244,6 +268,14 @@ def test_loading_legacy_session_drops_system_center_points(tmp_path):
                         "label": 1,
                         "created_at": "2026-01-01T00:00:00+00:00",
                         "source": "system",
+                    },
+                    {
+                        "point_id": "initial_category_prompt_0",
+                        "x": 4.5,
+                        "y": 4.5,
+                        "label": 1,
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "source": "category",
                     }
                 ],
             }
@@ -253,13 +285,13 @@ def test_loading_legacy_session_drops_system_center_points(tmp_path):
 
     session = SessionState.from_dict(payload)
 
-    assert session.system_prompt_points == []
+    assert [point.point_id for point in session.system_prompt_points] == ["initial_category_prompt_0"]
     assert [point.point_id for point in session.working_points] == ["manual_keep"]
     assert [point.point_id for point in session.history[0].manual_points_snapshot] == ["manual_keep"]
-    assert session.history[0].system_prompt_points == []
+    assert [point.point_id for point in session.history[0].system_prompt_points] == ["initial_category_prompt_0"]
 
 
-def test_iteration_strips_legacy_center_points_before_inference(tmp_path):
+def test_iteration_strips_generated_points_before_inference(tmp_path):
     target = _target(tmp_path)
     target_store = UploadedTargetStore(tmp_path / "runs")
     session_store = SessionStore(tmp_path / "sessions")
@@ -281,6 +313,14 @@ def test_iteration_strips_legacy_center_points_before_inference(tmp_path):
                 label=1,
                 created_at="2026-01-01T00:00:00+00:00",
                 source="system",
+            ),
+            PointRecord(
+                point_id="initial_category_prompt_0",
+                x=4.5,
+                y=4.5,
+                label=1,
+                created_at="2026-01-01T00:00:00+00:00",
+                source="category",
             ),
             PointRecord(
                 point_id="manual_keep",
