@@ -144,6 +144,7 @@ class LineStrokeRecord:
 @dataclass
 class LockedRegionRecord:
     region_id: str
+    label: int
     created_at: str
     source: str = "manual"
     points: list[StrokePointRecord] = field(default_factory=list)
@@ -157,6 +158,7 @@ class LockedRegionRecord:
     def from_dict(cls, payload: dict[str, Any]) -> "LockedRegionRecord":
         return cls(
             region_id=str(payload["region_id"]),
+            label=1 if int(payload.get("label", 1)) == 1 else 0,
             created_at=str(payload.get("created_at") or utc_now_iso()),
             source=str(payload.get("source", "manual") or "manual"),
             points=[StrokePointRecord.from_dict(item) for item in payload.get("points", [])],

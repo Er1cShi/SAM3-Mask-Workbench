@@ -4083,6 +4083,7 @@ class MaskIterationService:
             normalized.append(
                 LockedRegionRecord(
                     region_id=str(item.get("region_id") or f"region_{uuid4().hex[:12]}"),
+                    label=1 if int(item.get("label", 1)) == 1 else 0,
                     created_at=str(item.get("created_at") or utc_now_iso()),
                     source=str(item.get("source", "manual") or "manual"),
                     points=points,
@@ -4090,17 +4091,13 @@ class MaskIterationService:
             )
         return normalized
 
-    def _locked_regions_mask(self, session: SessionState, regions: list[LockedRegionRecord]) -> Any:
+    def _locked_region_mask(self, session: SessionState, region: LockedRegionRecord) -> Any:
         runtime = self.inference_service._load_runtime()
         np = runtime["np"]
-        if not regions:
-            return np.zeros((session.target.image_height, session.target.image_width), dtype=bool)
         canvas = Image.new("1", (session.target.image_width, session.target.image_height), 0)
         drawer = ImageDraw.Draw(canvas)
-        for region in regions:
-            points = [(float(point.x), float(point.y)) for point in region.points]
-            if len(points) < 3:
-                continue
+        points = [(float(point.x), float(point.y)) for point in region.points]
+        if len(points) >= 3:
             drawer.polygon(points, fill=1, outline=1)
         return np.asarray(canvas, dtype=bool)
 
@@ -4121,23 +4118,63 @@ class MaskIterationService:
         np = runtime["np"]
         if not session.locked_regions:
             return np.asarray(mask).astype(bool), np.asarray(logits, dtype=np.float32)
-        locked_mask = self._locked_regions_mask(session, session.locked_regions)
-        combined_mask = np.asarray(mask).astype(bool) | locked_mask
+        combined_mask = np.asarray(mask).astype(bool).copy()
         updated_logits = np.asarray(logits, dtype=np.float32).copy()
-        if updated_logits.ndim == 3 and updated_logits.shape[0] >= 1:
-            logits_locked_mask = self._resize_bool_mask(
-                locked_mask,
-                updated_logits.shape[-2],
-                updated_logits.shape[-1],
-            )
-            updated_logits[0][logits_locked_mask] = np.maximum(updated_logits[0][logits_locked_mask], 32.0)
-        elif updated_logits.ndim == 2:
-            logits_locked_mask = self._resize_bool_mask(
-                locked_mask,
-                updated_logits.shape[0],
-                updated_logits.shape[1],
-            )
-            updated_logits[logits_locked_mask] = np.maximum(updated_logits[logits_locked_mask], 32.0)
+        background_mask = np.zeros_like(combined_mask, dtype=bool)
+        background_logits_mask = None
+        for region in session.locked_regions:
+            locked_mask = self._locked_region_mask(session, region)
+            if int(region.label) == 1:
+                combined_mask[locked_mask] = True
+                logits_value = 32.0
+            else:
+                background_mask |= locked_mask
+                logits_value = -32.0
+            if updated_logits.ndim == 3 and updated_logits.shape[0] >= 1:
+                logits_locked_mask = self._resize_bool_mask(
+                    locked_mask,
+                    updated_logits.shape[-2],
+                    updated_logits.shape[-1],
+                )
+                if logits_value > 0:
+                    updated_logits[0][logits_locked_mask] = np.maximum(
+                        updated_logits[0][logits_locked_mask],
+                        logits_value,
+                    )
+                else:
+                    updated_logits[0][logits_locked_mask] = np.minimum(
+                        updated_logits[0][logits_locked_mask],
+                        logits_value,
+                    )
+                    background_logits_mask = (
+                        logits_locked_mask
+                        if background_logits_mask is None
+                        else (background_logits_mask | logits_locked_mask)
+                    )
+            elif updated_logits.ndim == 2:
+                logits_locked_mask = self._resize_bool_mask(
+                    locked_mask,
+                    updated_logits.shape[0],
+                    updated_logits.shape[1],
+                )
+                if logits_value > 0:
+                    updated_logits[logits_locked_mask] = np.maximum(updated_logits[logits_locked_mask], logits_value)
+                else:
+                    updated_logits[logits_locked_mask] = np.minimum(updated_logits[logits_locked_mask], logits_value)
+                    background_logits_mask = (
+                        logits_locked_mask
+                        if background_logits_mask is None
+                        else (background_logits_mask | logits_locked_mask)
+                    )
+        combined_mask[background_mask] = False
+        if background_logits_mask is not None:
+            if updated_logits.ndim == 3 and updated_logits.shape[0] >= 1:
+                updated_logits[0][background_logits_mask] = np.minimum(
+                    updated_logits[0][background_logits_mask],
+                    -32.0,
+                )
+            elif updated_logits.ndim == 2:
+                updated_logits[background_logits_mask] = np.minimum(updated_logits[background_logits_mask], -32.0)
         return combined_mask, updated_logits
 
     def _build_history_from_mask_and_logits(
@@ -4737,13 +4774,13 @@ class MaskIterationService:
             self._save_session_outputs(session)
             return self._session_payload(session)
 
-    def lock_region(self, target_key: str, points: Any) -> dict[str, Any]:
+    def lock_region(self, target_key: str, points: Any, label: Any = 1) -> dict[str, Any]:
         with self._lock:
             session = self._require_session(target_key)
             current = session.current_history()
             normalized = self._normalize_locked_regions(
                 session,
-                [{"points": points, "source": "manual"}],
+                [{"points": points, "label": label, "source": "manual"}],
             )
             if not normalized:
                 raise ValueError("Locked region requires at least 3 distinct points and a non-trivial polygon area.")
@@ -4954,6 +4991,11 @@ class MaskIterationService:
     ) -> dict[str, Any]:
         with self._lock:
             session = self._require_session(target_key)
+            if session.locked_regions:
+                raise ValueError(
+                    "SAM iteration is disabled while closed locked regions exist. "
+                    "Delete all locked regions to return to model iteration."
+                )
             if text_prompt is not None:
                 session.text_prompt = str(text_prompt or "").strip()
             if line_strokes is not None:

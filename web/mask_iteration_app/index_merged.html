@@ -958,7 +958,7 @@
           <div class="toolbar-grid">
             <button id="toggleBBoxBtn" type="button">显示原始 BBox</button>
             <button id="togglePromptBoxBtn" type="button" class="hidden">显示 Prompt Box</button>
-            <button id="togglePointsBtn" type="button">显示点 / 线</button>
+            <button id="togglePointsBtn" type="button">显示点 / 线 / 锁区</button>
             <button id="clearCompareBtn" type="button">清除对比</button>
           </div>
         </div>
@@ -1278,6 +1278,9 @@
       if (!Array.isArray(session.locked_regions)) {
         session.locked_regions = [];
       }
+      session.locked_regions.forEach((region) => {
+        region.label = Number(region.label) === 0 ? 0 : 1;
+      });
       if (typeof session.text_prompt !== "string") {
         session.text_prompt = "";
       }
@@ -1580,6 +1583,7 @@
       const hasSession = Boolean(state.session);
       const hasWorkingPoints = Boolean(hasSession && state.session.working_points.length);
       const hasLineStrokes = Boolean(hasSession && state.session.line_strokes && state.session.line_strokes.length);
+      const hasLockedRegions = Boolean(hasSession && state.session.locked_regions && state.session.locked_regions.length);
       const hasRegionDraft = Boolean(state.drawingRegion.active && state.drawingRegion.points.length);
       const canCommitRegion = Boolean(hasRegionDraft && normalizeRegionPointsForSave(state.drawingRegion.points || []));
       const validateAvailable = Boolean(state.bootstrap && state.bootstrap.validate_tools && state.bootstrap.validate_tools.available);
@@ -1591,7 +1595,8 @@
       el.importRunCopyBtn.disabled = state.busy;
       el.prevTargetBtn.disabled = !hasTargets || state.busy;
       el.nextTargetBtn.disabled = !hasTargets || state.busy;
-      el.iterateBtn.disabled = !hasSession || state.busy;
+      el.iterateBtn.disabled = !hasSession || state.busy || hasLockedRegions;
+      el.iterateBtn.title = hasLockedRegions ? "Closed locked regions switch this target to manual mode. Delete all locked regions to run SAM iteration again." : "";
       el.saveCurrentMaskBtn.disabled = !hasSession || state.busy;
       el.undoBtn.disabled = !hasWorkingPoints || state.busy;
       el.clearPointsBtn.disabled = !hasWorkingPoints || state.busy;
@@ -2330,6 +2335,7 @@
               <div>
                 <strong>Draft</strong>
                 <span class="pill ${draftReady ? "fg" : ""}">${draftReady ? "ready" : "editing"}</span>
+                <span class="pill ${state.currentLabel === 0 ? "bg" : "fg"}">${state.currentLabel === 0 ? "BG" : "FG"}</span>
               </div>
               <div class="button-row">
                 <span class="subtle">${draftPoints.length} pts | area ${Math.round(draftArea)}</span>
@@ -2351,7 +2357,7 @@
           <div class="stroke-row">
             <div>
               <strong>R${index + 1}</strong>
-              <span class="pill fg">locked</span>
+              <span class="pill ${Number(region.label) === 0 ? "bg" : "fg"}">${Number(region.label) === 0 ? "BG" : "FG"}</span>
             </div>
             <div class="button-row">
               <span class="subtle">${(region.points || []).length} pts</span>
@@ -2518,6 +2524,7 @@
         })),
         locked_regions: (state.session.locked_regions || []).map((region) => ({
           region_id: region.region_id,
+          label: Number(region.label) === 0 ? 0 : 1,
           point_count: (region.points || []).length,
         })),
         text_prompt: state.session.text_prompt || "",
@@ -2645,11 +2652,20 @@
       }
     }
 
+    function lockedRegionColor(region) {
+      return Number(region && region.label) === 0 ? COLORS.strokeBg : COLORS.strokeFg;
+    }
+
+    function lockedRegionDraftColor() {
+      return state.currentLabel === 0 ? COLORS.strokeBg : COLORS.strokeFg;
+    }
+
     function drawLockedRegions(ctx, regions, crop) {
       (regions || []).forEach((region, regionIndex) => {
         const points = region.points || [];
         if (points.length < 3) return;
         const hovered = isHoveredPrompt("region", region.region_id || `region_${regionIndex}`);
+        const color = lockedRegionColor(region);
         ctx.beginPath();
         points.forEach((point, index) => {
           const x = Number(point.x) - crop.x0;
@@ -2662,11 +2678,11 @@
         });
         ctx.closePath();
         ctx.fillStyle = hovered
-          ? `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.3)`
-          : `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.18)`;
+          ? `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.3)`
+          : `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.18)`;
         ctx.strokeStyle = hovered
           ? "rgba(255, 255, 255, 0.96)"
-          : `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.92)`;
+          : `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.92)`;
         ctx.lineWidth = hovered ? 3.4 : 1.4;
         ctx.fill();
         ctx.stroke();
@@ -2683,6 +2699,7 @@
         const previewClosePoint = hoverPoint || points[points.length - 1];
         const startPoint = points[0];
         const draftHovered = isHoveredPrompt("region", "draft");
+        const draftColor = lockedRegionDraftColor();
 
         if (points.length >= 3) {
           ctx.beginPath();
@@ -2697,8 +2714,8 @@
           });
           ctx.closePath();
           ctx.fillStyle = draftHovered
-            ? `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.24)`
-            : `rgba(${COLORS.lockedRegionFill[0]}, ${COLORS.lockedRegionFill[1]}, ${COLORS.lockedRegionFill[2]}, 0.12)`;
+            ? `rgba(${draftColor[0]}, ${draftColor[1]}, ${draftColor[2]}, 0.24)`
+            : `rgba(${draftColor[0]}, ${draftColor[1]}, ${draftColor[2]}, 0.12)`;
           ctx.fill();
         }
 
@@ -2714,7 +2731,7 @@
         });
         ctx.strokeStyle = draftHovered
           ? "rgba(255, 255, 255, 0.96)"
-          : `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.96)`;
+          : `rgba(${draftColor[0]}, ${draftColor[1]}, ${draftColor[2]}, 0.96)`;
         ctx.lineWidth = draftHovered ? 3.2 : 1.8;
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
@@ -2728,7 +2745,7 @@
           const lastPoint = points[points.length - 1];
           ctx.moveTo(Number(lastPoint.x) - crop.x0, Number(lastPoint.y) - crop.y0);
           ctx.lineTo(Number(hoverPoint.x) - crop.x0, Number(hoverPoint.y) - crop.y0);
-          ctx.strokeStyle = `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.72)`;
+          ctx.strokeStyle = `rgba(${draftColor[0]}, ${draftColor[1]}, ${draftColor[2]}, 0.72)`;
           ctx.lineWidth = 1.4;
           ctx.setLineDash([8, 6]);
           ctx.stroke();
@@ -2741,7 +2758,7 @@
           ctx.lineTo(Number(startPoint.x) - crop.x0, Number(startPoint.y) - crop.y0);
           ctx.strokeStyle = canClose
             ? "rgba(255, 211, 141, 0.96)"
-            : `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.4)`;
+            : `rgba(${draftColor[0]}, ${draftColor[1]}, ${draftColor[2]}, 0.4)`;
           ctx.lineWidth = canClose ? 1.8 : 1.1;
           ctx.setLineDash([6, 5]);
           ctx.stroke();
@@ -2756,7 +2773,7 @@
           ctx.arc(x, y, isStart ? 3.8 : 3.0, 0, Math.PI * 2);
           ctx.fillStyle = isStart && canClose
             ? "rgba(255, 211, 141, 0.95)"
-            : `rgba(${COLORS.lockedRegionStroke[0]}, ${COLORS.lockedRegionStroke[1]}, ${COLORS.lockedRegionStroke[2]}, 0.98)`;
+            : `rgba(${draftColor[0]}, ${draftColor[1]}, ${draftColor[2]}, 0.98)`;
           ctx.fill();
           ctx.lineWidth = 1;
           ctx.strokeStyle = "rgba(9, 16, 24, 0.95)";
@@ -2841,8 +2858,8 @@
         drawPoints(ctx, state.session.system_prompt_points || [], crop, COLORS.system, 1.8);
         drawPoints(ctx, state.session.working_points || [], crop, null, 1.8);
         drawLineStrokes(ctx, state.session.line_strokes || [], crop);
+        drawLockedRegions(ctx, state.session.locked_regions || [], crop);
       }
-      drawLockedRegions(ctx, state.session.locked_regions || [], crop);
     }
 
     function renderAll() {
@@ -3717,6 +3734,11 @@
 
     async function handleIterate() {
       if (!state.session) return;
+      if ((state.session.locked_regions || []).length) {
+        setStatus("SAM iteration is disabled while closed locked regions exist. Delete all locked regions to return to model iteration.", true);
+        renderButtons();
+        return;
+      }
       try {
         setBusy("Running one local SAM3 iteration...");
         const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/iterate`, {
@@ -3821,9 +3843,10 @@
         setBusy("Locking selected mask region...");
         const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/lock-region`, {
           points: regionPoints,
+          label: state.currentLabel,
         });
         applySessionPayload(payload);
-        clearBusy("Locked region saved.");
+        clearBusy("Locked region saved. Manual mode is active while any locked region exists.");
         return true;
       } catch (error) {
         state.busy = false;

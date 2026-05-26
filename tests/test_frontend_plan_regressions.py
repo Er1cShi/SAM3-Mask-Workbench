@@ -111,3 +111,48 @@ def test_prompt_record_hover_highlights_canvas_items():
     assert "state.hoverPrompt" in html
     assert "function isHoveredPrompt" in html
     assert "drawPromptLabel" in html
+
+
+def test_locked_region_payload_uses_current_label():
+    html = _html()
+
+    save_start = html.index("async function saveLockedRegion")
+    save_body = html[save_start:html.index("function removeTargetsAndStayNearCurrent", save_start)]
+
+    assert "/lock-region" in save_body
+    assert "label: state.currentLabel" in save_body
+
+
+def test_prompt_visibility_toggle_includes_locked_regions():
+    html = _html()
+
+    render_start = html.index("function renderCanvas")
+    render_body = html[render_start:html.index("function renderAll", render_start)]
+    show_points_start = render_body.index("if (state.showPoints)")
+    show_points_body = render_body[show_points_start:render_body.index("}", show_points_start)]
+
+    assert "drawPoints" in show_points_body
+    assert "drawLineStrokes" in show_points_body
+    assert "drawLockedRegions" in show_points_body
+    assert "显示点 / 线 / 锁区" in html
+
+
+def test_locked_regions_disable_iteration_button():
+    html = _html()
+
+    buttons_start = html.index("function renderButtons")
+    buttons_body = html[buttons_start:html.index("function toggleModeButtons", buttons_start)]
+
+    assert "hasLockedRegions" in buttons_body
+    assert "el.iterateBtn.disabled = !hasSession || state.busy || hasLockedRegions" in buttons_body
+    assert "Manual mode is active while any locked region exists" in html
+
+
+def test_locked_region_list_renders_foreground_background_labels():
+    html = _html()
+
+    list_start = html.index("function renderLockedRegionList")
+    list_body = html[list_start:html.index("function renderHistoryList", list_start)]
+
+    assert "Number(region.label) === 0 ? \"BG\" : \"FG\"" in list_body
+    assert "Number(region.label) === 0 ? \"bg\" : \"fg\"" in list_body

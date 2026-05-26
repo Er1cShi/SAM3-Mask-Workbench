@@ -2,10 +2,18 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mask_iteration_webapp.models import HistoryRecord, PointRecord, SessionState, TargetRecord
+from mask_iteration_webapp.models import (
+    HistoryRecord,
+    LockedRegionRecord,
+    PointRecord,
+    SessionState,
+    StrokePointRecord,
+    TargetRecord,
+)
 from mask_iteration_webapp.service import MaskIterationService, Sam3InferenceService, SessionStore, UploadedTargetStore
 
 
@@ -291,6 +299,101 @@ def test_loading_legacy_session_drops_system_center_points(tmp_path):
     assert [point.point_id for point in session.history[0].system_prompt_points] == ["initial_category_prompt_0"]
 
 
+def _locked_region(region_id, label, points):
+    return LockedRegionRecord(
+        region_id=region_id,
+        label=label,
+        created_at="2026-01-01T00:00:00+00:00",
+        points=[StrokePointRecord(x=x, y=y) for x, y in points],
+    )
+
+
+def test_legacy_locked_region_defaults_to_foreground_label():
+    region = LockedRegionRecord.from_dict(
+        {
+            "region_id": "legacy_region",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "points": [{"x": 1, "y": 1}, {"x": 3, "y": 1}, {"x": 3, "y": 3}],
+        }
+    )
+
+    assert region.label == 1
+
+
+def test_locked_regions_apply_background_over_foreground(tmp_path):
+    target = _target(tmp_path)
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    session_store = SessionStore(tmp_path / "sessions")
+    inference = RecordingIterationInference()
+    service = MaskIterationService(target_store, session_store, inference)
+    session = SessionState(
+        schema_version=1,
+        session_id=target.key,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        target=target,
+        prompt_box_xyxy=[2.0, 2.0, 6.0, 6.0],
+        system_prompt_points=[],
+        working_points=[],
+        line_strokes=[],
+        locked_regions=[
+            _locked_region("fg", 1, [(1, 1), (5, 1), (5, 5), (1, 5)]),
+            _locked_region("bg", 0, [(3, 3), (7, 3), (7, 7), (3, 7)]),
+        ],
+        text_prompt="",
+        history=[],
+        current_history_id="init",
+    )
+
+    mask, logits = service._apply_locked_regions_to_mask_and_logits(
+        session,
+        np.zeros((10, 10), dtype=bool),
+        np.zeros((1, 10, 10), dtype=np.float32),
+    )
+
+    assert bool(mask[2, 2]) is True
+    assert bool(mask[4, 4]) is False
+    assert float(logits[0, 2, 2]) == 32.0
+    assert float(logits[0, 4, 4]) == -32.0
+
+
+def test_locked_regions_background_wins_even_when_added_first(tmp_path):
+    target = _target(tmp_path)
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    session_store = SessionStore(tmp_path / "sessions")
+    inference = RecordingIterationInference()
+    service = MaskIterationService(target_store, session_store, inference)
+    session = SessionState(
+        schema_version=1,
+        session_id=target.key,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        target=target,
+        prompt_box_xyxy=[2.0, 2.0, 6.0, 6.0],
+        system_prompt_points=[],
+        working_points=[],
+        line_strokes=[],
+        locked_regions=[
+            _locked_region("bg", 0, [(3, 3), (7, 3), (7, 7), (3, 7)]),
+            _locked_region("fg", 1, [(1, 1), (5, 1), (5, 5), (1, 5)]),
+        ],
+        text_prompt="",
+        history=[],
+        current_history_id="init",
+    )
+
+    mask, logits = service._apply_locked_regions_to_mask_and_logits(
+        session,
+        np.zeros((10, 10), dtype=bool),
+        np.zeros((1, 10, 10), dtype=np.float32),
+    )
+
+    assert bool(mask[2, 2]) is True
+    assert bool(mask[4, 4]) is False
+    assert float(logits[0, 2, 2]) == 32.0
+    assert float(logits[0, 4, 4]) == -32.0
+
+
 def test_iteration_strips_generated_points_before_inference(tmp_path):
     target = _target(tmp_path)
     target_store = UploadedTargetStore(tmp_path / "runs")
@@ -359,3 +462,45 @@ def test_iteration_strips_generated_points_before_inference(tmp_path):
     assert updated is not None
     assert [point.point_id for point in updated.working_points] == ["manual_keep"]
     assert [point.point_id for point in updated.current_history().manual_points_snapshot] == ["manual_keep"]
+
+
+def test_iteration_is_blocked_while_locked_regions_exist(tmp_path):
+    target = _target(tmp_path)
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    session_store = SessionStore(tmp_path / "sessions")
+    inference = RecordingIterationInference()
+    service = MaskIterationService(target_store, session_store, inference)
+    session = SessionState(
+        schema_version=1,
+        session_id=target.key,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        target=target,
+        prompt_box_xyxy=[2.0, 2.0, 6.0, 6.0],
+        system_prompt_points=[],
+        working_points=[],
+        line_strokes=[],
+        locked_regions=[_locked_region("fg", 1, [(1, 1), (5, 1), (5, 5), (1, 5)])],
+        text_prompt="",
+        history=[
+            HistoryRecord(
+                history_id="init",
+                parent_history_id=None,
+                name="init",
+                kind="initial",
+                created_at="2026-01-01T00:00:00+00:00",
+                score=0.75,
+                mask_rle={"mask": [[True, False], [False, False]]},
+                mask_area=1,
+                mask_bbox_xywh=[0.0, 0.0, 1.0, 1.0],
+                prompt_box_xyxy=[2.0, 2.0, 6.0, 6.0],
+            )
+        ],
+        current_history_id="init",
+    )
+    session_store.save_session(session)
+
+    with pytest.raises(ValueError, match="closed locked regions"):
+        service.iterate(target.key)
+
+    assert inference.iteration_points is None

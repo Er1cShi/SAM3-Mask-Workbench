@@ -160,6 +160,7 @@ def create_handler(service, static_dir: Path):
                         service.lock_region(
                             target_key=target_key,
                             points=payload.get("points"),
+                            label=payload.get("label", 1),
                         ),
                     )
 
