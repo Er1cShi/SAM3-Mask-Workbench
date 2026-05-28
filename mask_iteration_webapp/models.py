@@ -187,6 +187,7 @@ class HistoryRecord:
     mask_rle_relpath: str | None = None
     mask_source: str = "model"
     output_saved_at: str | None = None
+    output_save_mode: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -227,6 +228,7 @@ class HistoryRecord:
             mask_rle_relpath=payload.get("mask_rle_relpath"),
             mask_source=str(payload.get("mask_source") or "model"),
             output_saved_at=payload.get("output_saved_at"),
+            output_save_mode=payload.get("output_save_mode"),
         )
 
 

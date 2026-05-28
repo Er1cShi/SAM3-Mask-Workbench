@@ -66,6 +66,8 @@ MASK_SOURCE_STATE = "state"
 MASK_SOURCE_MODEL = "model"
 MASK_SOURCE_ITERATION = "iteration"
 MASK_SOURCES = {MASK_SOURCE_COCO, MASK_SOURCE_STATE, MASK_SOURCE_MODEL, MASK_SOURCE_ITERATION}
+SAVE_MASK_LOCKED_ONLY = "locked_only"
+SAVE_MASK_LOCKED_UNION_MASK = "locked_union_mask"
 
 
 def compact_path_component(text: str, max_length: int = 48) -> str:
@@ -2926,9 +2928,7 @@ class MaskIterationService:
         output_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
         return output_path
 
-    def _session_current_mask_coco_rle(self, session: SessionState) -> dict[str, Any]:
-        current = session.current_history()
-        mask = self.inference_service.mask_from_rle(current.mask_rle)
+    def _mask_to_coco_rle(self, mask: Any) -> dict[str, Any]:
         runtime = self.inference_service._load_runtime()
         np = runtime["np"]
         mask_bool = np.asfortranarray(np.asarray(mask).astype(np.uint8))
@@ -2940,6 +2940,61 @@ class MaskIterationService:
                 counts = counts.decode("ascii")
             return {"size": [int(value) for value in encoded["size"]], "counts": counts}
         return self.inference_service._mask_to_rle(mask_bool.astype(bool))
+
+    @staticmethod
+    def _normalize_save_mask_mode(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        aliases = {
+            "locked": SAVE_MASK_LOCKED_ONLY,
+            "locked_regions": SAVE_MASK_LOCKED_ONLY,
+            "locked_only": SAVE_MASK_LOCKED_ONLY,
+            "mask": SAVE_MASK_LOCKED_UNION_MASK,
+            "current": SAVE_MASK_LOCKED_UNION_MASK,
+            "union": SAVE_MASK_LOCKED_UNION_MASK,
+            "locked_union_current": SAVE_MASK_LOCKED_UNION_MASK,
+            "locked_union_mask": SAVE_MASK_LOCKED_UNION_MASK,
+        }
+        return aliases.get(normalized, SAVE_MASK_LOCKED_UNION_MASK)
+
+    @staticmethod
+    def _is_locked_region_history(history_item: HistoryRecord) -> bool:
+        return history_item.kind in {"region_lock", "region_unlock"}
+
+    def _base_mask_history_for_save(self, session: SessionState) -> HistoryRecord:
+        current = session.current_history()
+        if not session.locked_regions:
+            return current
+        for history_item in reversed(session.history):
+            if not self._is_locked_region_history(history_item):
+                return history_item
+        return current
+
+    def _locked_regions_output_mask(self, session: SessionState, base_mask: Any | None = None) -> Any:
+        runtime = self.inference_service._load_runtime()
+        np = runtime["np"]
+        if base_mask is None:
+            output_mask = np.zeros((session.target.image_height, session.target.image_width), dtype=bool)
+        else:
+            output_mask = np.asarray(base_mask).astype(bool).copy()
+        background_mask = np.zeros_like(output_mask, dtype=bool)
+        for region in session.locked_regions:
+            locked_mask = self._locked_region_mask(session, region)
+            if int(region.label) == 1:
+                output_mask[locked_mask] = True
+            else:
+                background_mask |= locked_mask
+        output_mask[background_mask] = False
+        return output_mask
+
+    def _session_output_mask_for_save(self, session: SessionState, save_mode: str) -> Any:
+        normalized_mode = self._normalize_save_mask_mode(save_mode)
+        if normalized_mode == SAVE_MASK_LOCKED_ONLY:
+            return self._locked_regions_output_mask(session)
+        base_history = self._base_mask_history_for_save(session)
+        base_mask = self.inference_service.mask_from_rle(base_history.mask_rle)
+        if session.locked_regions:
+            return self._locked_regions_output_mask(session, base_mask=base_mask)
+        return base_mask
 
     @staticmethod
     def _deliverable_coco_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2992,7 +3047,7 @@ class MaskIterationService:
             "categories": categories,
         }
 
-    def _save_coco_segmentation_output(self, session: SessionState) -> Path | None:
+    def _save_coco_segmentation_output(self, session: SessionState, save_mode: str | None = None) -> Path | None:
         target = session.target
         source_path = Path(target.annotation_json_path)
         if not source_path.exists():
@@ -3007,15 +3062,18 @@ class MaskIterationService:
             return None
 
         annotation_id = str(target.source_annotation_id or target.annotation_id)
-        current = session.current_history()
+        output_mask = self._session_output_mask_for_save(
+            session,
+            self._normalize_save_mask_mode(save_mode),
+        )
         wrote = False
         for annotation in payload.get("annotations", []):
             if not isinstance(annotation, dict):
                 continue
             if str(annotation.get("id")) != annotation_id:
                 continue
-            annotation["segmentation"] = self._session_current_mask_coco_rle(session)
-            annotation["area"] = int(current.mask_area)
+            annotation["segmentation"] = self._mask_to_coco_rle(output_mask)
+            annotation["area"] = int(output_mask.sum())
             annotation["bbox"] = [round(float(value), 3) for value in target.bbox_xywh]
             annotation["iscrowd"] = int(annotation.get("iscrowd") or 0)
             wrote = True
@@ -5105,19 +5163,24 @@ class MaskIterationService:
             raise FileNotFoundError(f"Session not found for target {target_key}")
         return session
 
-    def save_current_mask(self, target_key: str) -> dict[str, Any]:
+    def save_current_mask(self, target_key: str, save_mode: str | None = None) -> dict[str, Any]:
         with self._lock:
             session = self._require_session(target_key)
             saved_at = utc_now_iso()
+            normalized_mode = self._normalize_save_mask_mode(save_mode)
+            if normalized_mode == SAVE_MASK_LOCKED_ONLY and not session.locked_regions:
+                raise ValueError("No locked regions exist for locked-only save.")
             current = session.current_history()
             current.output_saved_at = saved_at
+            current.output_save_mode = normalized_mode
             session.updated_at = saved_at
-            coco_path = self._save_coco_segmentation_output(session)
+            coco_path = self._save_coco_segmentation_output(session, save_mode=normalized_mode)
             state_path = self._save_session_outputs(session)
             return {
                 **self._session_payload(session),
                 "saved_current_mask": {
                     "saved_at": saved_at,
+                    "save_mode": normalized_mode,
                     "coco_path": str(coco_path.resolve()) if coco_path else None,
                     "state_path": str(state_path.resolve()) if state_path else None,
                 },
@@ -5127,7 +5190,7 @@ class MaskIterationService:
         current = session.current_history()
         if not current.output_saved_at:
             return
-        self._save_coco_segmentation_output(session)
+        self._save_coco_segmentation_output(session, save_mode=current.output_save_mode)
 
     def _save_session_outputs(self, session: SessionState) -> Path:
         self.session_store.save_session(session)

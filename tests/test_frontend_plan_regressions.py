@@ -123,18 +123,44 @@ def test_locked_region_payload_uses_current_label():
     assert "label: state.currentLabel" in save_body
 
 
-def test_prompt_visibility_toggle_includes_locked_regions():
+def test_prompt_visibility_toggles_are_split_from_locked_regions():
     html = _html()
 
     render_start = html.index("function renderCanvas")
     render_body = html[render_start:html.index("function renderAll", render_start)]
     show_points_start = render_body.index("if (state.showPoints)")
     show_points_body = render_body[show_points_start:render_body.index("}", show_points_start)]
+    show_locked_start = render_body.index("if (state.showLockedRegions)")
+    show_locked_body = render_body[show_locked_start:render_body.index("}", show_locked_start)]
 
     assert "drawPoints" in show_points_body
     assert "drawLineStrokes" in show_points_body
-    assert "drawLockedRegions" in show_points_body
-    assert "显示点 / 线 / 锁区" in html
+    assert "drawLockedRegions" not in show_points_body
+    assert "drawLockedRegions" in show_locked_body
+    assert 'id="togglePointsBtn"' in html
+    assert 'id="toggleMaskBtn"' in html
+    assert 'id="toggleLockedRegionsBtn"' in html
+
+
+def test_mask_display_uses_non_lock_history_while_locked_regions_are_visible():
+    html = _html()
+
+    assert "function getDisplayMaskHistory" in html
+    display_start = html.index("function getDisplayMaskHistory")
+    display_body = html[display_start:html.index("function getCompareHistory", display_start)]
+    assert "state.session.locked_regions" in display_body
+    assert "!isLockedRegionHistory(item)" in display_body
+
+
+def test_save_buttons_send_explicit_mask_modes_and_track_saved_state():
+    html = _html()
+
+    assert 'id="saveLockedOnlyBtn"' in html
+    assert 'id="saveCurrentMaskBtn"' in html
+    assert '"locked_only"' in html
+    assert '"locked_union_mask"' in html
+    assert "save-pending" in html
+    assert "save-saved" in html
 
 
 def test_locked_regions_disable_iteration_button():

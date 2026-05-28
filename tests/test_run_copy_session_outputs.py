@@ -10,7 +10,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mask_iteration_webapp.models import HistoryRecord, SessionState, TargetRecord
+from mask_iteration_webapp.models import HistoryRecord, LockedRegionRecord, SessionState, StrokePointRecord, TargetRecord
 from mask_iteration_webapp.service import (
     RUN_COCO_DIR,
     RUN_DELETE_DIR,
@@ -122,6 +122,16 @@ def _history(history_id, parent, point):
     )
 
 
+def _locked_region(region_id, label, points):
+    return LockedRegionRecord(
+        region_id=region_id,
+        label=label,
+        created_at="2026-01-01T00:00:00+00:00",
+        source="manual",
+        points=[StrokePointRecord(x=float(x), y=float(y)) for x, y in points],
+    )
+
+
 def _session(target, current_history_id="iter1"):
     return SessionState(
         schema_version=1,
@@ -159,6 +169,56 @@ def test_coco_segmentation_and_state_use_current_history(tmp_path):
     assert [item["history_id"] for item in state_payload["sessions"][0]["history"]] == ["init", "iter1"]
     assert state_payload["sessions"][0]["history"][1]["mask_rle"]["points"] == [[2, 2]]
     assert payload["session"]["history"][0]["output_saved_at"]
+
+
+def test_save_locked_only_uses_locked_regions_without_model_mask(tmp_path):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
+    session = _session(_target(tmp_path), current_history_id="lock1")
+    session.locked_regions = [_locked_region("fg", 1, [(0, 0), (1, 0), (1, 1), (0, 1)])]
+    lock_history = _history("lock1", "iter1", [0, 0])
+    lock_history.kind = "region_lock"
+    session.history.append(lock_history)
+    service._save_session_outputs(session)
+
+    payload = service.save_current_mask("target_a", save_mode="locked_only")
+
+    coco = json.loads(Path(session.target.annotation_json_path).read_text(encoding="utf-8"))
+    points = {tuple(point) for point in coco["annotations"][0]["segmentation"]["points"]}
+    assert (0, 0) in points
+    assert (2, 2) not in points
+    assert payload["saved_current_mask"]["save_mode"] == "locked_only"
+    assert payload["session"]["history"][-1]["output_save_mode"] == "locked_only"
+
+
+def test_save_locked_union_mask_uses_latest_non_lock_history(tmp_path):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
+    session = _session(_target(tmp_path), current_history_id="lock1")
+    session.locked_regions = [_locked_region("fg", 1, [(0, 0), (1, 0), (1, 1), (0, 1)])]
+    lock_history = _history("lock1", "iter1", [0, 0])
+    lock_history.kind = "region_lock"
+    session.history.append(lock_history)
+    service._save_session_outputs(session)
+
+    service.save_current_mask("target_a", save_mode="locked_union_mask")
+
+    coco = json.loads(Path(session.target.annotation_json_path).read_text(encoding="utf-8"))
+    points = {tuple(point) for point in coco["annotations"][0]["segmentation"]["points"]}
+    assert (0, 0) in points
+    assert (2, 2) in points
+
+
+def test_save_locked_union_mask_without_locked_regions_saves_current_mask(tmp_path):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
+    session = _session(_target(tmp_path), current_history_id="iter1")
+    service._save_session_outputs(session)
+
+    service.save_current_mask("target_a", save_mode="locked_union_mask")
+
+    coco = json.loads(Path(session.target.annotation_json_path).read_text(encoding="utf-8"))
+    assert coco["annotations"][0]["segmentation"]["points"] == [[2, 2]]
 
 
 def test_open_session_uses_imported_coco_rle_segmentation(tmp_path):

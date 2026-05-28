@@ -252,7 +252,10 @@ def create_handler(service, static_dir: Path):
 
                 if path.startswith("/api/sessions/") and path.endswith("/save-current-mask"):
                     target_key = unquote(path[len("/api/sessions/") : -len("/save-current-mask")]).strip("/")
-                    return self._send_json(HTTPStatus.OK, service.save_current_mask(target_key))
+                    return self._send_json(
+                        HTTPStatus.OK,
+                        service.save_current_mask(target_key, save_mode=payload.get("save_mode")),
+                    )
 
                 if path.startswith("/api/sessions/") and path.endswith("/rollback"):
                     target_key = unquote(path[len("/api/sessions/") : -len("/rollback")]).strip("/")

@@ -203,8 +203,17 @@
     #importRunCopyBtn,
     #exportWorkDatasetBtn,
     #iterateBtn,
-    #saveCurrentMaskBtn,
     #validateRunBtn {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
+    }
+    .save-mask-btn.save-pending {
+      border-color: rgba(200, 53, 43, 0.62);
+      background: var(--red);
+      color: #fff;
+    }
+    .save-mask-btn.save-saved {
       border-color: var(--blue);
       background: var(--blue);
       color: #fff;
@@ -974,7 +983,8 @@
           <div class="section-title">主要操作</div>
           <div class="toolbar-primary">
             <button id="iterateBtn" type="button">迭代一次</button>
-            <button id="saveCurrentMaskBtn" type="button">保存 COCO</button>
+            <button id="saveLockedOnlyBtn" class="save-mask-btn" type="button">保存锁区</button>
+            <button id="saveCurrentMaskBtn" class="save-mask-btn" type="button">保存锁区+Mask</button>
           </div>
           <div id="maskSourceSummary" class="mask-status-line">当前 Mask 来源：等待打开目标</div>
           <div id="maskSaveSummary" class="mask-status-line">State 自动保存，COCO 未手动保存</div>
@@ -1006,7 +1016,9 @@
           <div class="toolbar-grid">
             <button id="toggleBBoxBtn" type="button">显示原始 BBox</button>
             <button id="togglePromptBoxBtn" type="button" class="hidden">显示 Prompt Box</button>
-            <button id="togglePointsBtn" type="button">显示点 / 线 / 锁区</button>
+            <button id="togglePointsBtn" type="button">显示点 / 线</button>
+            <button id="toggleMaskBtn" type="button">显示 Mask</button>
+            <button id="toggleLockedRegionsBtn" type="button">显示锁区</button>
             <button id="clearCompareBtn" type="button">清除对比</button>
           </div>
         </div>
@@ -1162,6 +1174,8 @@
       toggleBBoxBtn: document.getElementById("toggleBBoxBtn"),
       togglePromptBoxBtn: document.getElementById("togglePromptBoxBtn"),
       togglePointsBtn: document.getElementById("togglePointsBtn"),
+      toggleMaskBtn: document.getElementById("toggleMaskBtn"),
+      toggleLockedRegionsBtn: document.getElementById("toggleLockedRegionsBtn"),
       clearCompareBtn: document.getElementById("clearCompareBtn"),
       fgModeBtn: document.getElementById("fgModeBtn"),
       bgModeBtn: document.getElementById("bgModeBtn"),
@@ -1174,6 +1188,7 @@
       textPromptInput: document.getElementById("textPromptInput"),
       targetStatusBtn: document.getElementById("targetStatusBtn"),
       iterateBtn: document.getElementById("iterateBtn"),
+      saveLockedOnlyBtn: document.getElementById("saveLockedOnlyBtn"),
       saveCurrentMaskBtn: document.getElementById("saveCurrentMaskBtn"),
       maskSourceSummary: document.getElementById("maskSourceSummary"),
       maskSaveSummary: document.getElementById("maskSaveSummary"),
@@ -1254,6 +1269,8 @@
       showBBox: true,
       showPromptBox: false,
       showPoints: true,
+      showMask: true,
+      showLockedRegions: true,
       zoomPercent: 100,
       autoFitPending: false,
       panX: 0,
@@ -1318,6 +1335,24 @@
     function getCurrentHistory() {
       if (!state.session) return null;
       return state.session.history.find((item) => item.history_id === state.session.current_history_id) || null;
+    }
+
+    function isLockedRegionHistory(item) {
+      return Boolean(item && (item.kind === "region_lock" || item.kind === "region_unlock"));
+    }
+
+    function getDisplayMaskHistory() {
+      const current = getCurrentHistory();
+      if (!state.session || !(state.session.locked_regions || []).length) {
+        return current;
+      }
+      for (let index = state.session.history.length - 1; index >= 0; index -= 1) {
+        const item = state.session.history[index];
+        if (!isLockedRegionHistory(item)) {
+          return item;
+        }
+      }
+      return current;
     }
 
     function getCompareHistory() {
@@ -1746,7 +1781,9 @@
       el.nextTargetBtn.disabled = !hasTargets || state.busy;
       el.iterateBtn.disabled = !hasSession || state.busy || hasLockedRegions;
       el.iterateBtn.title = hasLockedRegions ? "Closed locked regions switch this target to manual mode. Delete all locked regions to run SAM iteration again." : "";
+      el.saveLockedOnlyBtn.disabled = !hasSession || state.busy || !hasLockedRegions;
       el.saveCurrentMaskBtn.disabled = !hasSession || state.busy;
+      renderSaveButtonState();
       el.undoBtn.disabled = !hasWorkingPoints || state.busy;
       el.clearPointsBtn.disabled = !hasWorkingPoints || state.busy;
       el.clearLinesBtn.disabled = !hasLineStrokes || state.busy;
@@ -1765,6 +1802,24 @@
       el.validateRunBtn.disabled = !hasSession || state.busy || !validateAvailable;
     }
 
+    function renderSaveButtonState() {
+      const current = getCurrentHistory();
+      const saved = Boolean(state.session && current && current.output_saved_at);
+      [el.saveLockedOnlyBtn, el.saveCurrentMaskBtn].forEach((button) => {
+        if (!button) return;
+        button.classList.toggle("save-pending", !saved);
+        button.classList.toggle("save-saved", saved);
+      });
+      if (el.saveLockedOnlyBtn) {
+        el.saveLockedOnlyBtn.title = state.session && !(state.session.locked_regions || []).length
+          ? "当前没有锁区，无法只保存锁区。"
+          : "只把前景锁区保存到 COCO，背景锁区会扣除。";
+      }
+      if (el.saveCurrentMaskBtn) {
+        el.saveCurrentMaskBtn.title = "保存 Mask 与前景锁区的并集；没有锁区时保存当前 Mask。";
+      }
+    }
+
     function toggleModeButtons() {
       el.fgModeBtn.classList.toggle("active-fg", state.currentLabel === 1);
       el.bgModeBtn.classList.toggle("active-bg", state.currentLabel === 0);
@@ -1775,6 +1830,9 @@
       el.lineToolBtn.classList.toggle("active-tool", state.currentTool === "line");
       el.lockRegionToolBtn.classList.toggle("active-tool", state.currentTool === "region");
       el.panToolBtn.classList.toggle("active-tool", state.currentTool === "pan");
+      el.togglePointsBtn.classList.toggle("active-tool", state.showPoints);
+      el.toggleMaskBtn.classList.toggle("active-tool", state.showMask);
+      el.toggleLockedRegionsBtn.classList.toggle("active-tool", state.showLockedRegions);
     }
 
     function renderTargetList() {
@@ -1884,8 +1942,9 @@
         return;
       }
       el.maskSourceSummary.textContent = `当前 Mask 来源：${maskSourceLabel(current.mask_source || state.session.current_mask_source)}`;
+      const savedModeLabel = current.output_save_mode === "locked_only" ? "只保存锁区" : "锁区+Mask";
       el.maskSaveSummary.textContent = current.output_saved_at
-        ? `State 自动保存，COCO 已手动保存 (${current.output_saved_at})`
+        ? `State 自动保存，COCO 已手动保存：${savedModeLabel} (${current.output_saved_at})`
         : "State 自动保存，COCO 未手动保存";
     }
 
@@ -2940,7 +2999,7 @@
       }
 
       const target = getCurrentTarget();
-      const current = getCurrentHistory();
+      const displayMask = getDisplayMaskHistory();
       const compare = getCompareHistory();
       const crop = computeCropBox(target);
       const canvas = el.viewer;
@@ -2978,10 +3037,10 @@
           0
         );
       }
-      if (current) {
-        const decoded = decodeSimpleRLE(current.mask_rle, current.history_id);
+      if (state.showMask && displayMask) {
+        const decoded = decodeSimpleRLE(displayMask.mask_rle, displayMask.history_id);
         ctx.drawImage(
-          buildMaskOverlayCanvas(decoded, crop, resolveCurrentMaskColor(current), Number(el.maskOpacity.value)),
+          buildMaskOverlayCanvas(decoded, crop, resolveCurrentMaskColor(displayMask), Number(el.maskOpacity.value)),
           0,
           0
         );
@@ -3007,6 +3066,8 @@
         drawPoints(ctx, state.session.system_prompt_points || [], crop, COLORS.system, 1.8);
         drawPoints(ctx, state.session.working_points || [], crop, null, 1.8);
         drawLineStrokes(ctx, state.session.line_strokes || [], crop);
+      }
+      if (state.showLockedRegions) {
         drawLockedRegions(ctx, state.session.locked_regions || [], crop);
       }
     }
@@ -3942,14 +4003,18 @@
       }
     }
 
-    async function handleSaveCurrentMask() {
+    async function handleSaveCurrentMask(saveMode = "locked_union_mask") {
       if (!state.session) return;
       try {
-        setBusy("Saving current mask to COCO...");
-        const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/save-current-mask`, {});
+        const mode = saveMode === "locked_only" ? "locked_only" : "locked_union_mask";
+        setBusy(mode === "locked_only" ? "Saving locked regions to COCO..." : "Saving mask and locked regions to COCO...");
+        const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/save-current-mask`, {
+          save_mode: mode,
+        });
         applySessionPayload(payload);
         const saved = payload.saved_current_mask || {};
-        clearBusy(`Current mask saved to COCO${saved.saved_at ? ` at ${saved.saved_at}` : ""}. State is auto-saved.`);
+        const label = saved.save_mode === "locked_only" ? "Locked regions" : "Mask + locked regions";
+        clearBusy(`${label} saved to COCO${saved.saved_at ? ` at ${saved.saved_at}` : ""}. State is auto-saved.`);
       } catch (error) {
         state.busy = false;
         renderButtons();
@@ -4451,6 +4516,8 @@
       el.toggleBBoxBtn.addEventListener("click", () => { state.showBBox = !state.showBBox; renderAll(); });
       el.togglePromptBoxBtn.addEventListener("click", () => { state.showPromptBox = !state.showPromptBox; renderAll(); });
       el.togglePointsBtn.addEventListener("click", () => { state.showPoints = !state.showPoints; renderAll(); });
+      el.toggleMaskBtn.addEventListener("click", () => { state.showMask = !state.showMask; renderAll(); });
+      el.toggleLockedRegionsBtn.addEventListener("click", () => { state.showLockedRegions = !state.showLockedRegions; renderAll(); });
       el.clearCompareBtn.addEventListener("click", () => { state.compareHistoryId = null; renderAll(); });
       el.fgModeBtn.addEventListener("click", () => { state.currentLabel = 1; toggleModeButtons(); renderCanvas(); });
       el.bgModeBtn.addEventListener("click", () => { state.currentLabel = 0; toggleModeButtons(); renderCanvas(); });
@@ -4484,7 +4551,8 @@
         }
       });
       el.iterateBtn.addEventListener("click", handleIterate);
-      el.saveCurrentMaskBtn.addEventListener("click", handleSaveCurrentMask);
+      el.saveLockedOnlyBtn.addEventListener("click", () => handleSaveCurrentMask("locked_only"));
+      el.saveCurrentMaskBtn.addEventListener("click", () => handleSaveCurrentMask("locked_union_mask"));
       el.undoBtn.addEventListener("click", handleUndo);
       el.clearPointsBtn.addEventListener("click", handleClearPoints);
       el.clearLinesBtn.addEventListener("click", handleClearLines);
