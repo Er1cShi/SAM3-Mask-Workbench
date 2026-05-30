@@ -985,6 +985,7 @@
             <button id="iterateBtn" type="button">迭代一次 (Space)</button>
             <button id="saveLockedOnlyBtn" class="save-mask-btn" type="button">只保存锁区</button>
             <button id="saveCurrentMaskBtn" class="save-mask-btn" type="button">保存当前Mask+锁区 (Enter)</button>
+            <button id="maskViewToggleBtn" type="button">查看保存结果</button>
           </div>
           <div id="maskSourceSummary" class="mask-status-line">当前 Mask 来源：等待打开目标</div>
           <div id="maskSaveSummary" class="mask-status-line">State 自动保存，COCO 未手动保存</div>
@@ -1192,6 +1193,7 @@
       iterateBtn: document.getElementById("iterateBtn"),
       saveLockedOnlyBtn: document.getElementById("saveLockedOnlyBtn"),
       saveCurrentMaskBtn: document.getElementById("saveCurrentMaskBtn"),
+      maskViewToggleBtn: document.getElementById("maskViewToggleBtn"),
       maskSourceSummary: document.getElementById("maskSourceSummary"),
       maskSaveSummary: document.getElementById("maskSaveSummary"),
       undoBtn: document.getElementById("undoBtn"),
@@ -1264,6 +1266,7 @@
       imageVersion: 0,
       maskCache: new Map(),
       savedOutputPreview: null,
+      maskViewMode: "edit",
       restoredMaskTargetKeys: new Set(),
       restoredMaskHistoryByTarget: new Map(),
       selectedHistoryIds: new Set(),
@@ -1346,7 +1349,7 @@
     }
 
     function getDisplayMaskHistory() {
-      if (state.savedOutputPreview && state.savedOutputPreview.mask_rle) {
+      if (state.maskViewMode === "saved" && state.savedOutputPreview && state.savedOutputPreview.mask_rle) {
         return {
           history_id: state.savedOutputPreview.preview_id,
           mask_rle: state.savedOutputPreview.mask_rle,
@@ -1582,7 +1585,33 @@
 
     function buildTargetLabel(target) {
       const bbox = (target.bbox_xywh || []).map((value) => round2(value)).join(", ");
-      return `${target.category_name} | ${target.annotation_id} | ${target.image_file_name} | [${bbox}]`;
+      return `[${targetQueueStatusLabel(target)}] ${target.category_name} | ${target.annotation_id} | ${target.image_file_name} | [${bbox}]`;
+    }
+
+    function targetQueueStatusLabel(target) {
+      const status = String(target && target.target_status || "keep").toLowerCase();
+      if (status === "delete" || target && target.is_deleted) return "已删除";
+      if (status === "wrong") return "错误框";
+      if (status === "difficult") return "难处理";
+      if (target && target.current_mask_saved) return "已保存COCO";
+      if (target && target.has_session) return "已编辑未保存";
+      return "未打开";
+    }
+
+    function estimateLockedForegroundArea() {
+      if (!state.session) return 0;
+      return (state.session.locked_regions || [])
+        .filter((region) => Number(region.label) === 1)
+        .reduce((total, region) => total + computePolygonArea(region.points || []), 0);
+    }
+
+    function shouldConfirmSavingMaskWithSmallLockedRegion() {
+      if (!state.session || !(state.session.locked_regions || []).length) return false;
+      const current = getCurrentHistory();
+      const currentArea = Number(current && current.mask_area);
+      const lockedArea = estimateLockedForegroundArea();
+      if (!Number.isFinite(currentArea) || !Number.isFinite(lockedArea) || lockedArea <= 0) return false;
+      return currentArea > lockedArea * 2;
     }
 
     function isQueueTarget(target) {
@@ -1748,6 +1777,8 @@
       state.validateSession = null;
       state.session = null;
       state.compareHistoryId = null;
+      state.savedOutputPreview = null;
+      state.maskViewMode = "edit";
       state.image = null;
       state.maskCache.clear();
       state.selectedHistoryIds.clear();
@@ -1812,6 +1843,14 @@
       el.iterateBtn.title = hasLockedRegions ? "Closed locked regions switch this target to manual mode. Delete all locked regions to run SAM iteration again." : "";
       el.saveLockedOnlyBtn.disabled = !hasSession || state.busy || !hasLockedRegions;
       el.saveCurrentMaskBtn.disabled = !hasSession || state.busy;
+      if (el.maskViewToggleBtn) {
+        const hasSavedPreview = Boolean(state.savedOutputPreview && state.savedOutputPreview.mask_rle);
+        el.maskViewToggleBtn.disabled = !hasSession || state.busy || !hasSavedPreview;
+        el.maskViewToggleBtn.textContent = state.maskViewMode === "saved" ? "查看编辑Mask" : "查看保存结果";
+        el.maskViewToggleBtn.title = hasSavedPreview
+          ? "在编辑中的 Mask 和已保存 COCO 输出预览之间切换。"
+          : "当前目标还没有可预览的 COCO 保存结果。";
+      }
       renderSaveButtonState();
       el.undoBtn.disabled = !hasWorkingPoints || state.busy;
       el.clearPointsBtn.disabled = !hasWorkingPoints || state.busy;
@@ -1974,9 +2013,10 @@
         el.maskSaveSummary.textContent = "State 自动保存，COCO 未手动保存";
         return;
       }
-      if (state.savedOutputPreview) {
+      if (state.maskViewMode === "saved" && state.savedOutputPreview) {
         const previewModeLabel = state.savedOutputPreview.save_mode === "locked_only" ? "只保存锁区" : "当前Mask+锁区";
-        el.maskSourceSummary.textContent = `当前显示：已保存 COCO 输出预览 (${previewModeLabel})`;
+        const areaText = Number.isFinite(Number(state.savedOutputPreview.area)) ? `，面积 ${state.savedOutputPreview.area} px` : "";
+        el.maskSourceSummary.textContent = `当前显示：已保存 COCO 输出预览 (${previewModeLabel}${areaText})`;
       } else {
         el.maskSourceSummary.textContent = `当前 Mask 来源：${maskSourceLabel(current.mask_source || state.session.current_mask_source)}`;
       }
@@ -3139,6 +3179,7 @@
       state.validateSession = null;
       state.compareHistoryId = null;
       state.savedOutputPreview = null;
+      state.maskViewMode = "edit";
       state.image = null;
       state.maskCache.clear();
       state.drawingStroke.active = false;
@@ -3153,6 +3194,7 @@
 
     function markCurrentTargetProcessed(session) {
       if (!session || !session.session_id) return;
+      const current = (session.history || []).find((item) => item.history_id === session.current_history_id) || null;
       state.targets = state.targets.map((target) => {
         if (target.key !== session.session_id) return target;
         return {
@@ -3161,6 +3203,9 @@
           history_count: (session.history || []).length,
           updated_at: session.updated_at,
           current_history_id: session.current_history_id,
+          current_mask_saved: Boolean(session.current_mask_saved),
+          current_mask_saved_at: session.current_mask_saved_at || null,
+          current_mask_save_mode: current && current.output_save_mode ? current.output_save_mode : "",
         };
       });
       state.filteredTargets = state.filteredTargets.map((target) => {
@@ -3171,6 +3216,9 @@
           history_count: (session.history || []).length,
           updated_at: session.updated_at,
           current_history_id: session.current_history_id,
+          current_mask_saved: Boolean(session.current_mask_saved),
+          current_mask_saved_at: session.current_mask_saved_at || null,
+          current_mask_save_mode: current && current.output_save_mode ? current.output_save_mode : "",
         };
       });
     }
@@ -3191,9 +3239,10 @@
     }
 
     function applySessionPayload(payload) {
+      const previousSessionId = state.session && state.session.session_id;
       state.session = payload.session;
       state.validateSession = payload.validate_tools || state.validateSession;
-      const savedMask = payload.saved_current_mask || null;
+      const savedMask = payload.saved_current_mask || (state.session && state.session.saved_output_preview) || null;
       if (savedMask && savedMask.preview_mask_rle) {
         state.savedOutputPreview = {
           preview_id: `saved_${state.session.session_id}_${savedMask.saved_at || Date.now()}`,
@@ -3203,8 +3252,14 @@
           area: savedMask.preview_mask_area,
           bbox_xywh: savedMask.preview_mask_bbox_xywh,
         };
+        if (payload.saved_current_mask) {
+          state.maskViewMode = "saved";
+        } else if (previousSessionId !== state.session.session_id) {
+          state.maskViewMode = "edit";
+        }
       } else {
         state.savedOutputPreview = null;
+        state.maskViewMode = "edit";
       }
       ensureSessionPromptState(state.session);
       if (state.session && state.restoredMaskTargetKeys.has(state.session.session_id) && !state.restoredMaskHistoryByTarget.has(state.session.session_id)) {
@@ -4066,6 +4121,15 @@
       if (!state.session) return;
       try {
         const mode = saveMode === "locked_only" ? "locked_only" : "locked_union_mask";
+        if (mode === "locked_union_mask" && shouldConfirmSavingMaskWithSmallLockedRegion()) {
+          const ok = window.confirm(
+            "当前 Mask 面积明显大于前景锁区。\n\n"
+            + "保存当前Mask+锁区会把当前大 Mask 一起写入 COCO。\n"
+            + "如果你只想保存手工圈出的区域，请点“只保存锁区”。\n\n"
+            + "是否仍然继续保存当前Mask+锁区？"
+          );
+          if (!ok) return;
+        }
         setBusy(mode === "locked_only" ? "Saving locked-only COCO output..." : "Saving current mask plus locked regions to COCO...");
         const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/save-current-mask`, {
           save_mode: mode,
@@ -4682,6 +4746,13 @@
       el.iterateBtn.addEventListener("click", handleIterate);
       el.saveLockedOnlyBtn.addEventListener("click", () => handleSaveCurrentMask("locked_only"));
       el.saveCurrentMaskBtn.addEventListener("click", () => handleSaveCurrentMask("locked_union_mask"));
+      if (el.maskViewToggleBtn) {
+        el.maskViewToggleBtn.addEventListener("click", () => {
+          if (!state.savedOutputPreview || !state.savedOutputPreview.mask_rle) return;
+          state.maskViewMode = state.maskViewMode === "saved" ? "edit" : "saved";
+          renderAll();
+        });
+      }
       el.undoBtn.addEventListener("click", handleUndo);
       el.clearPointsBtn.addEventListener("click", handleClearPoints);
       el.clearLinesBtn.addEventListener("click", handleClearLines);

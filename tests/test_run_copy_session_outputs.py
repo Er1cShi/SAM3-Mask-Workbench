@@ -208,7 +208,12 @@ def test_save_locked_only_uses_locked_regions_without_model_mask(tmp_path):
     assert (0, 0) in preview_points
     assert (2, 2) not in preview_points
     assert payload["saved_current_mask"]["preview_mask_area"] == len(preview_points)
+    assert payload["session"]["saved_output_preview"]["save_mode"] == "locked_only"
+    assert payload["session"]["saved_output_preview"]["preview_mask_area"] == len(preview_points)
     assert payload["session"]["history"][-1]["output_save_mode"] == "locked_only"
+    meta = service.session_store.list_session_meta()["target_a"]
+    assert meta["current_mask_saved"] is True
+    assert meta["current_mask_save_mode"] == "locked_only"
 
 
 def test_save_locked_union_mask_uses_latest_non_lock_history(tmp_path):
@@ -230,6 +235,7 @@ def test_save_locked_union_mask_uses_latest_non_lock_history(tmp_path):
     preview_points = {tuple(point) for point in payload["saved_current_mask"]["preview_mask_rle"]["points"]}
     assert (0, 0) in preview_points
     assert (2, 2) in preview_points
+    assert payload["session"]["saved_output_preview"]["save_mode"] == "locked_union_mask"
 
 
 def test_save_locked_union_mask_without_locked_regions_saves_current_mask(tmp_path):

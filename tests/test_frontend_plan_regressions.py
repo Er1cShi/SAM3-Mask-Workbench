@@ -169,6 +169,7 @@ def test_save_buttons_send_explicit_mask_modes_and_track_saved_state():
 
     assert 'id="saveLockedOnlyBtn"' in html
     assert 'id="saveCurrentMaskBtn"' in html
+    assert 'id="maskViewToggleBtn"' in html
     assert "只保存锁区" in html
     assert "保存当前Mask+锁区" in html
     assert '"locked_only"' in html
@@ -176,7 +177,27 @@ def test_save_buttons_send_explicit_mask_modes_and_track_saved_state():
     assert "save-pending" in html
     assert "save-saved" in html
     assert "savedOutputPreview" in html
+    assert "maskViewMode" in html
     assert "preview_mask_rle" in html
+
+
+def test_target_list_shows_save_status_and_saved_preview_toggle():
+    html = _html()
+
+    assert "function targetQueueStatusLabel" in html
+    assert "已保存COCO" in html
+    assert "已编辑未保存" in html
+    assert "查看保存结果" in html
+    assert "查看编辑Mask" in html
+
+
+def test_saving_mask_with_small_locked_region_requires_confirmation():
+    html = _html()
+
+    assert "function shouldConfirmSavingMaskWithSmallLockedRegion" in html
+    assert "estimateLockedForegroundArea" in html
+    assert "当前 Mask 面积明显大于前景锁区" in html
+    assert "window.confirm" in html
 
 
 def test_locked_regions_disable_iteration_button():

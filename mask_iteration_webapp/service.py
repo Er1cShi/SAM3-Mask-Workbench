@@ -271,12 +271,16 @@ class SessionStore:
 
     @staticmethod
     def _session_meta_payload(session: SessionState) -> dict[str, Any]:
+        current = session.current_history()
         return {
             "schema_version": session.schema_version,
             "session_id": session.session_id,
             "updated_at": session.updated_at,
             "history_count": len(session.history),
             "current_history_id": session.current_history_id,
+            "current_mask_saved": bool(current.output_saved_at),
+            "current_mask_saved_at": current.output_saved_at,
+            "current_mask_save_mode": current.output_save_mode,
             "is_deleted": bool(session.is_deleted),
             "deleted_at": session.deleted_at,
             "target_status": session.target_status,
@@ -369,6 +373,9 @@ class SessionStore:
                 "updated_at": payload.get("updated_at"),
                 "history_count": int(payload.get("history_count", 0)),
                 "current_history_id": payload.get("current_history_id"),
+                "current_mask_saved": bool(payload.get("current_mask_saved", False)),
+                "current_mask_saved_at": payload.get("current_mask_saved_at"),
+                "current_mask_save_mode": payload.get("current_mask_save_mode"),
                 "is_deleted": bool(payload.get("is_deleted", False)),
                 "deleted_at": payload.get("deleted_at"),
                 "target_status": payload.get("target_status"),
@@ -383,11 +390,19 @@ class SessionStore:
             if target_key in results:
                 continue
             history = payload.get("history") or []
+            current_history_id = payload.get("current_history_id")
+            current_history = next(
+                (item for item in history if isinstance(item, dict) and item.get("history_id") == current_history_id),
+                history[-1] if history and isinstance(history[-1], dict) else {},
+            )
             results[target_key] = {
                 "has_session": True,
                 "updated_at": payload.get("updated_at"),
                 "history_count": len(history),
-                "current_history_id": payload.get("current_history_id"),
+                "current_history_id": current_history_id,
+                "current_mask_saved": bool(current_history.get("output_saved_at")),
+                "current_mask_saved_at": current_history.get("output_saved_at"),
+                "current_mask_save_mode": current_history.get("output_save_mode"),
                 "is_deleted": bool(payload.get("is_deleted", False)),
                 "deleted_at": payload.get("deleted_at"),
                 "target_status": payload.get("target_status"),
@@ -5223,6 +5238,18 @@ class MaskIterationService:
     def _session_payload(self, session: SessionState) -> dict[str, Any]:
         current = session.current_history()
         current_source = self._normalize_mask_source(current.mask_source)
+        saved_output_preview = None
+        if current.output_saved_at:
+            save_mode = self._normalize_save_mask_mode(current.output_save_mode)
+            with contextlib.suppress(Exception):
+                output_mask = self._session_output_mask_for_save(session, save_mode)
+                saved_output_preview = {
+                    "saved_at": current.output_saved_at,
+                    "save_mode": save_mode,
+                    "preview_mask_rle": self.inference_service._mask_to_rle(output_mask),
+                    "preview_mask_area": int(output_mask.sum()),
+                    "preview_mask_bbox_xywh": self.inference_service._mask_to_xywh(output_mask),
+                }
         return {
             "session": {
                 "schema_version": session.schema_version,
@@ -5243,6 +5270,7 @@ class MaskIterationService:
                 "current_mask_source": current_source,
                 "current_mask_saved_at": current.output_saved_at,
                 "current_mask_saved": bool(current.output_saved_at),
+                "saved_output_preview": saved_output_preview,
                 "history": [item.to_dict() for item in session.history],
                 "is_deleted": session.is_deleted,
                 "deleted_at": session.deleted_at,
@@ -5268,6 +5296,10 @@ class MaskIterationService:
             "has_session": bool(meta.get("has_session")),
             "history_count": int(meta.get("history_count", 0)),
             "updated_at": meta.get("updated_at"),
+            "current_history_id": meta.get("current_history_id"),
+            "current_mask_saved": bool(meta.get("current_mask_saved", False)),
+            "current_mask_saved_at": meta.get("current_mask_saved_at"),
+            "current_mask_save_mode": meta.get("current_mask_save_mode"),
                 "is_deleted": bool(meta.get("is_deleted", False)),
                 "deleted_at": meta.get("deleted_at"),
                 "target_status": meta.get("target_status") or ("delete" if bool(meta.get("is_deleted", False)) else "keep"),
