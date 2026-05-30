@@ -152,15 +152,31 @@ def test_mask_display_uses_non_lock_history_while_locked_regions_are_visible():
     assert "!isLockedRegionHistory(item)" in display_body
 
 
+def test_mouse_coordinates_outside_canvas_are_not_clamped_to_edges():
+    html = _html()
+
+    fn_start = html.index("function clientToImageXY")
+    fn_body = html[fn_start:html.index("async function addPointAtEvent", fn_start)]
+    assert "rawX" in fn_body
+    assert "rawY" in fn_body
+    assert "return null" in fn_body
+    assert "clamp((event.clientX - rect.left)" not in fn_body
+    assert "clamp((event.clientY - rect.top)" not in fn_body
+
+
 def test_save_buttons_send_explicit_mask_modes_and_track_saved_state():
     html = _html()
 
     assert 'id="saveLockedOnlyBtn"' in html
     assert 'id="saveCurrentMaskBtn"' in html
+    assert "只保存锁区" in html
+    assert "保存当前Mask+锁区" in html
     assert '"locked_only"' in html
     assert '"locked_union_mask"' in html
     assert "save-pending" in html
     assert "save-saved" in html
+    assert "savedOutputPreview" in html
+    assert "preview_mask_rle" in html
 
 
 def test_locked_regions_disable_iteration_button():

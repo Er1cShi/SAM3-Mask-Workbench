@@ -15,7 +15,7 @@ import sys
 import threading
 from copy import deepcopy
 from io import BytesIO
-from math import hypot
+from math import hypot, isfinite
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -3047,7 +3047,12 @@ class MaskIterationService:
             "categories": categories,
         }
 
-    def _save_coco_segmentation_output(self, session: SessionState, save_mode: str | None = None) -> Path | None:
+    def _save_coco_segmentation_output(
+        self,
+        session: SessionState,
+        save_mode: str | None = None,
+        output_mask: Any | None = None,
+    ) -> Path | None:
         target = session.target
         source_path = Path(target.annotation_json_path)
         if not source_path.exists():
@@ -3062,10 +3067,11 @@ class MaskIterationService:
             return None
 
         annotation_id = str(target.source_annotation_id or target.annotation_id)
-        output_mask = self._session_output_mask_for_save(
-            session,
-            self._normalize_save_mask_mode(save_mode),
-        )
+        if output_mask is None:
+            output_mask = self._session_output_mask_for_save(
+                session,
+                self._normalize_save_mask_mode(save_mode),
+            )
         wrote = False
         for annotation in payload.get("annotations", []):
             if not isinstance(annotation, dict):
@@ -4081,8 +4087,10 @@ class MaskIterationService:
             for point in raw_points:
                 if not isinstance(point, dict):
                     continue
-                x = self._clamp(float(point.get("x", 0.0)), 0.0, float(session.target.image_width - 1))
-                y = self._clamp(float(point.get("y", 0.0)), 0.0, float(session.target.image_height - 1))
+                x = float(point.get("x", 0.0))
+                y = float(point.get("y", 0.0))
+                if not self._is_image_point_in_bounds(session, x, y):
+                    continue
                 current_xy = (round(x, 2), round(y, 2))
                 if last_xy == current_xy:
                     continue
@@ -4120,8 +4128,10 @@ class MaskIterationService:
             for point in raw_points:
                 if not isinstance(point, dict):
                     continue
-                x = self._clamp(float(point.get("x", 0.0)), 0.0, float(session.target.image_width - 1))
-                y = self._clamp(float(point.get("y", 0.0)), 0.0, float(session.target.image_height - 1))
+                x = float(point.get("x", 0.0))
+                y = float(point.get("y", 0.0))
+                if not self._is_image_point_in_bounds(session, x, y):
+                    continue
                 current_xy = (round(x, 2), round(y, 2))
                 if current_xy == last_xy:
                     continue
@@ -4778,10 +4788,14 @@ class MaskIterationService:
     def add_point(self, target_key: str, x: float, y: float, label: int) -> dict[str, Any]:
         with self._lock:
             session = self._require_session(target_key)
+            x_value = float(x)
+            y_value = float(y)
+            if not self._is_image_point_in_bounds(session, x_value, y_value):
+                raise ValueError("Point is outside the image bounds.")
             point = PointRecord(
                 point_id=f"point_{uuid4().hex}",
-                x=self._clamp(float(x), 0.0, float(session.target.image_width - 1)),
-                y=self._clamp(float(y), 0.0, float(session.target.image_height - 1)),
+                x=x_value,
+                y=y_value,
                 label=1 if int(label) == 1 else 0,
                 created_at=utc_now_iso(),
                 source="manual",
@@ -5174,7 +5188,12 @@ class MaskIterationService:
             current.output_saved_at = saved_at
             current.output_save_mode = normalized_mode
             session.updated_at = saved_at
-            coco_path = self._save_coco_segmentation_output(session, save_mode=normalized_mode)
+            output_mask = self._session_output_mask_for_save(session, normalized_mode)
+            coco_path = self._save_coco_segmentation_output(
+                session,
+                save_mode=normalized_mode,
+                output_mask=output_mask,
+            )
             state_path = self._save_session_outputs(session)
             return {
                 **self._session_payload(session),
@@ -5183,6 +5202,9 @@ class MaskIterationService:
                     "save_mode": normalized_mode,
                     "coco_path": str(coco_path.resolve()) if coco_path else None,
                     "state_path": str(state_path.resolve()) if state_path else None,
+                    "preview_mask_rle": self.inference_service._mask_to_rle(output_mask),
+                    "preview_mask_area": int(output_mask.sum()),
+                    "preview_mask_bbox_xywh": self.inference_service._mask_to_xywh(output_mask),
                 },
             }
 
@@ -5254,3 +5276,12 @@ class MaskIterationService:
     @staticmethod
     def _clamp(value: float, lower: float, upper: float) -> float:
         return min(max(value, lower), upper)
+
+    @staticmethod
+    def _is_image_point_in_bounds(session: SessionState, x: float, y: float) -> bool:
+        return (
+            isfinite(float(x))
+            and isfinite(float(y))
+            and 0.0 <= float(x) <= float(session.target.image_width - 1)
+            and 0.0 <= float(y) <= float(session.target.image_height - 1)
+        )

@@ -171,6 +171,22 @@ def test_coco_segmentation_and_state_use_current_history(tmp_path):
     assert payload["session"]["history"][0]["output_saved_at"]
 
 
+def test_add_point_rejects_out_of_bounds_coordinates(tmp_path):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
+    session = _session(_target(tmp_path), current_history_id="init")
+    service._save_session_outputs(session)
+
+    with pytest.raises(ValueError, match="outside the image bounds"):
+        service.add_point("target_a", -0.5, 2.0, 1)
+
+    with pytest.raises(ValueError, match="outside the image bounds"):
+        service.add_point("target_a", 4.0, 2.0, 1)
+
+    payload = service.add_point("target_a", 3.0, 2.0, 1)
+    assert payload["session"]["working_points"][-1]["x"] == 3.0
+
+
 def test_save_locked_only_uses_locked_regions_without_model_mask(tmp_path):
     target_store = UploadedTargetStore(tmp_path / "runs")
     service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
@@ -188,6 +204,10 @@ def test_save_locked_only_uses_locked_regions_without_model_mask(tmp_path):
     assert (0, 0) in points
     assert (2, 2) not in points
     assert payload["saved_current_mask"]["save_mode"] == "locked_only"
+    preview_points = {tuple(point) for point in payload["saved_current_mask"]["preview_mask_rle"]["points"]}
+    assert (0, 0) in preview_points
+    assert (2, 2) not in preview_points
+    assert payload["saved_current_mask"]["preview_mask_area"] == len(preview_points)
     assert payload["session"]["history"][-1]["output_save_mode"] == "locked_only"
 
 
@@ -201,12 +221,15 @@ def test_save_locked_union_mask_uses_latest_non_lock_history(tmp_path):
     session.history.append(lock_history)
     service._save_session_outputs(session)
 
-    service.save_current_mask("target_a", save_mode="locked_union_mask")
+    payload = service.save_current_mask("target_a", save_mode="locked_union_mask")
 
     coco = json.loads(Path(session.target.annotation_json_path).read_text(encoding="utf-8"))
     points = {tuple(point) for point in coco["annotations"][0]["segmentation"]["points"]}
     assert (0, 0) in points
     assert (2, 2) in points
+    preview_points = {tuple(point) for point in payload["saved_current_mask"]["preview_mask_rle"]["points"]}
+    assert (0, 0) in preview_points
+    assert (2, 2) in preview_points
 
 
 def test_save_locked_union_mask_without_locked_regions_saves_current_mask(tmp_path):

@@ -983,8 +983,8 @@
           <div class="section-title">主要操作</div>
           <div class="toolbar-primary">
             <button id="iterateBtn" type="button">迭代一次 (Space)</button>
-            <button id="saveLockedOnlyBtn" class="save-mask-btn" type="button">保存锁区</button>
-            <button id="saveCurrentMaskBtn" class="save-mask-btn" type="button">保存锁区+Mask (Enter)</button>
+            <button id="saveLockedOnlyBtn" class="save-mask-btn" type="button">只保存锁区</button>
+            <button id="saveCurrentMaskBtn" class="save-mask-btn" type="button">保存当前Mask+锁区 (Enter)</button>
           </div>
           <div id="maskSourceSummary" class="mask-status-line">当前 Mask 来源：等待打开目标</div>
           <div id="maskSaveSummary" class="mask-status-line">State 自动保存，COCO 未手动保存</div>
@@ -1228,6 +1228,7 @@
       difficultMask: [255, 211, 64],
       errorMask: [255, 106, 89],
       compareMask: [255, 79, 143],
+      savedOutputMask: [48, 208, 127],
       bbox: [64, 223, 133],
       promptBox: [99, 210, 255],
       fg: [48, 208, 127],
@@ -1262,6 +1263,7 @@
       image: null,
       imageVersion: 0,
       maskCache: new Map(),
+      savedOutputPreview: null,
       restoredMaskTargetKeys: new Set(),
       restoredMaskHistoryByTarget: new Map(),
       selectedHistoryIds: new Set(),
@@ -1344,6 +1346,15 @@
     }
 
     function getDisplayMaskHistory() {
+      if (state.savedOutputPreview && state.savedOutputPreview.mask_rle) {
+        return {
+          history_id: state.savedOutputPreview.preview_id,
+          mask_rle: state.savedOutputPreview.mask_rle,
+          mask_source: "saved_output",
+          output_save_mode: state.savedOutputPreview.save_mode,
+          output_saved_at: state.savedOutputPreview.saved_at,
+        };
+      }
       const current = getCurrentHistory();
       if (!state.session || !(state.session.locked_regions || []).length) {
         return current;
@@ -1832,10 +1843,10 @@
       if (el.saveLockedOnlyBtn) {
         el.saveLockedOnlyBtn.title = state.session && !(state.session.locked_regions || []).length
           ? "当前没有锁区，无法只保存锁区。"
-          : "只把前景锁区保存到 COCO，背景锁区会扣除。";
+          : "最终 COCO 只包含前景锁区，并扣除背景锁区；不包含当前大 Mask。";
       }
       if (el.saveCurrentMaskBtn) {
-        el.saveCurrentMaskBtn.title = "保存 Mask 与前景锁区的并集；没有锁区时保存当前 Mask。";
+        el.saveCurrentMaskBtn.title = "最终 COCO 保存当前 Mask 与前景锁区的并集，并扣除背景锁区。";
       }
     }
 
@@ -1934,6 +1945,9 @@
       if (!current || !state.session) {
         return COLORS.currentMask;
       }
+      if (current.mask_source === "saved_output") {
+        return COLORS.savedOutputMask;
+      }
       const restoredHistoryId = state.restoredMaskHistoryByTarget.get(state.session.session_id);
       const isEncodedCurrentMask = (
         isEncodedMaskSource(current.mask_source || state.session.current_mask_source)
@@ -1960,8 +1974,13 @@
         el.maskSaveSummary.textContent = "State 自动保存，COCO 未手动保存";
         return;
       }
-      el.maskSourceSummary.textContent = `当前 Mask 来源：${maskSourceLabel(current.mask_source || state.session.current_mask_source)}`;
-      const savedModeLabel = current.output_save_mode === "locked_only" ? "只保存锁区" : "锁区+Mask";
+      if (state.savedOutputPreview) {
+        const previewModeLabel = state.savedOutputPreview.save_mode === "locked_only" ? "只保存锁区" : "当前Mask+锁区";
+        el.maskSourceSummary.textContent = `当前显示：已保存 COCO 输出预览 (${previewModeLabel})`;
+      } else {
+        el.maskSourceSummary.textContent = `当前 Mask 来源：${maskSourceLabel(current.mask_source || state.session.current_mask_source)}`;
+      }
+      const savedModeLabel = current.output_save_mode === "locked_only" ? "只保存锁区" : "当前Mask+锁区";
       el.maskSaveSummary.textContent = current.output_saved_at
         ? `State 自动保存，COCO 已手动保存：${savedModeLabel} (${current.output_saved_at})`
         : "State 自动保存，COCO 未手动保存";
@@ -3119,6 +3138,7 @@
       state.session = null;
       state.validateSession = null;
       state.compareHistoryId = null;
+      state.savedOutputPreview = null;
       state.image = null;
       state.maskCache.clear();
       state.drawingStroke.active = false;
@@ -3173,6 +3193,19 @@
     function applySessionPayload(payload) {
       state.session = payload.session;
       state.validateSession = payload.validate_tools || state.validateSession;
+      const savedMask = payload.saved_current_mask || null;
+      if (savedMask && savedMask.preview_mask_rle) {
+        state.savedOutputPreview = {
+          preview_id: `saved_${state.session.session_id}_${savedMask.saved_at || Date.now()}`,
+          mask_rle: savedMask.preview_mask_rle,
+          save_mode: savedMask.save_mode || "locked_union_mask",
+          saved_at: savedMask.saved_at || "",
+          area: savedMask.preview_mask_area,
+          bbox_xywh: savedMask.preview_mask_bbox_xywh,
+        };
+      } else {
+        state.savedOutputPreview = null;
+      }
       ensureSessionPromptState(state.session);
       if (state.session && state.restoredMaskTargetKeys.has(state.session.session_id) && !state.restoredMaskHistoryByTarget.has(state.session.session_id)) {
         state.restoredMaskHistoryByTarget.set(state.session.session_id, state.session.current_history_id);
@@ -4033,14 +4066,14 @@
       if (!state.session) return;
       try {
         const mode = saveMode === "locked_only" ? "locked_only" : "locked_union_mask";
-        setBusy(mode === "locked_only" ? "Saving locked regions to COCO..." : "Saving mask and locked regions to COCO...");
+        setBusy(mode === "locked_only" ? "Saving locked-only COCO output..." : "Saving current mask plus locked regions to COCO...");
         const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/save-current-mask`, {
           save_mode: mode,
         });
         applySessionPayload(payload);
         const saved = payload.saved_current_mask || {};
-        const label = saved.save_mode === "locked_only" ? "Locked regions" : "Mask + locked regions";
-        clearBusy(`${label} saved to COCO${saved.saved_at ? ` at ${saved.saved_at}` : ""}. State is auto-saved.`);
+        const label = saved.save_mode === "locked_only" ? "Only locked regions" : "Current mask + locked regions";
+        clearBusy(`${label} saved to COCO${saved.saved_at ? ` at ${saved.saved_at}` : ""}. The canvas is showing the saved output preview.`);
       } catch (error) {
         state.busy = false;
         renderButtons();
@@ -4265,8 +4298,13 @@
       }
       const scaleX = crop.width / Math.max(1, rect.width);
       const scaleY = crop.height / Math.max(1, rect.height);
-      const x = crop.x0 + clamp((event.clientX - rect.left) * scaleX, 0, crop.width - 1);
-      const y = crop.y0 + clamp((event.clientY - rect.top) * scaleY, 0, crop.height - 1);
+      const rawX = (event.clientX - rect.left) * scaleX;
+      const rawY = (event.clientY - rect.top) * scaleY;
+      if (rawX < 0 || rawX > crop.width - 1 || rawY < 0 || rawY > crop.height - 1) {
+        return null;
+      }
+      const x = crop.x0 + rawX;
+      const y = crop.y0 + rawY;
       return { x, y };
     }
 
