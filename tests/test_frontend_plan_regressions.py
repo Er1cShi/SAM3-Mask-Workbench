@@ -200,15 +200,38 @@ def test_saving_mask_with_small_locked_region_requires_confirmation():
     assert "window.confirm" in html
 
 
-def test_locked_regions_disable_iteration_button():
+def test_switching_saved_mask_modes_requires_overwrite_confirmation():
+    html = _html()
+
+    assert "function confirmSaveModeOverwrite" in html
+    assert "覆盖刚才的锁区-only结果" in html
+    assert "最终 COCO 会变成：当前 Mask + 前景锁区 - 背景锁区" in html
+    assert "会覆盖当前结果，最终 COCO 只保留锁区" in html
+    assert "if (!confirmSaveModeOverwrite(mode)) return" in html
+
+
+def test_locked_regions_can_be_selected_and_vertices_dragged():
+    html = _html()
+
+    assert 'data-region-edit' in html
+    assert "selectedLockedRegionId" in html
+    assert "lockedRegionVertexHitAtEvent" in html
+    assert "lockedRegionDrag" in html
+    assert "/lock-region/update" in html
+    assert "拖动画布上的顶点可修改形状" in html
+
+
+def test_locked_regions_allow_iteration_with_hard_constraints():
     html = _html()
 
     buttons_start = html.index("function renderButtons")
     buttons_body = html[buttons_start:html.index("function toggleModeButtons", buttons_start)]
 
     assert "hasLockedRegions" in buttons_body
-    assert "el.iterateBtn.disabled = !hasSession || state.busy || hasLockedRegions" in buttons_body
-    assert "Manual mode is active while any locked region exists" in html
+    assert "el.iterateBtn.disabled = !hasSession || state.busy" in buttons_body
+    assert "el.iterateBtn.disabled = !hasSession || state.busy || hasLockedRegions" not in buttons_body
+    assert "hard constraints" in html
+    assert "Future iterations will keep foreground locks and subtract background locks." in html
 
 
 def test_locked_region_list_renders_foreground_background_labels():

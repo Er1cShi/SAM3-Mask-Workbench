@@ -1300,6 +1300,13 @@
         points: [],
         hoverPoint: null,
       },
+      selectedLockedRegionId: "",
+      lockedRegionDrag: {
+        active: false,
+        regionId: "",
+        pointIndex: -1,
+        originalPoints: [],
+      },
       hoverPrompt: null,
     };
 
@@ -1342,6 +1349,20 @@
     function getCurrentHistory() {
       if (!state.session) return null;
       return state.session.history.find((item) => item.history_id === state.session.current_history_id) || null;
+    }
+
+    function getSelectedLockedRegion() {
+      if (!state.session || !state.selectedLockedRegionId) return null;
+      return (state.session.locked_regions || []).find((region) => region.region_id === state.selectedLockedRegionId) || null;
+    }
+
+    function selectLockedRegion(regionId) {
+      state.selectedLockedRegionId = regionId || "";
+      if (state.selectedLockedRegionId) {
+        setCurrentTool("region");
+        setHoveredPrompt("region", state.selectedLockedRegionId);
+      }
+      renderAll();
     }
 
     function isLockedRegionHistory(item) {
@@ -1453,6 +1474,28 @@
       const points = state.drawingRegion.points || [];
       if (!state.drawingRegion.active || points.length < 3 || !xy) return false;
       return distanceBetweenPoints(points[0], xy) <= getRegionCloseThreshold();
+    }
+
+    function lockedRegionVertexHitAtEvent(event) {
+      if (!state.session || state.currentTool !== "region") return null;
+      const regions = state.session.locked_regions || [];
+      if (!regions.length) return null;
+      const xy = clientToImageXY(event);
+      if (!xy) return null;
+      const threshold = getRegionCloseThreshold();
+      const selectedFirst = state.selectedLockedRegionId
+        ? regions.filter((region) => region.region_id === state.selectedLockedRegionId)
+        : [];
+      const candidates = [...selectedFirst, ...regions.filter((region) => region.region_id !== state.selectedLockedRegionId)];
+      for (const region of candidates) {
+        const points = region.points || [];
+        for (let index = 0; index < points.length; index += 1) {
+          if (distanceBetweenPoints(points[index], xy) <= threshold) {
+            return { region, pointIndex: index, xy };
+          }
+        }
+      }
+      return null;
     }
 
     function normalizeRegionPointsForSave(points) {
@@ -1612,6 +1655,26 @@
       const lockedArea = estimateLockedForegroundArea();
       if (!Number.isFinite(currentArea) || !Number.isFinite(lockedArea) || lockedArea <= 0) return false;
       return currentArea > lockedArea * 2;
+    }
+
+    function confirmSaveModeOverwrite(nextMode) {
+      const current = getCurrentHistory();
+      if (!current || !current.output_saved_at || !current.output_save_mode) return true;
+      const previousMode = current.output_save_mode === "locked_only" ? "locked_only" : "locked_union_mask";
+      if (previousMode === nextMode) return true;
+      if (previousMode === "locked_only" && nextMode === "locked_union_mask") {
+        return window.confirm(
+          "当前 COCO 已经保存为“只保存锁区”。\n\n"
+          + "继续点击“保存当前Mask+锁区”会覆盖刚才的锁区-only结果，"
+          + "最终 COCO 会变成：当前 Mask + 前景锁区 - 背景锁区。\n\n"
+          + "如果你想保留只保存锁区的结果，请取消。是否继续覆盖？"
+        );
+      }
+      return window.confirm(
+        "当前 COCO 已经保存为“保存当前Mask+锁区”。\n\n"
+        + "继续点击“只保存锁区”会覆盖当前结果，最终 COCO 只保留锁区。\n\n"
+        + "是否继续覆盖？"
+      );
     }
 
     function isQueueTarget(target) {
@@ -1784,6 +1847,8 @@
       state.selectedHistoryIds.clear();
       state.drawingStroke.active = false;
       state.drawingStroke.points = [];
+      state.selectedLockedRegionId = "";
+      state.lockedRegionDrag.active = false;
       resetDrawingRegion();
       state.hoverPrompt = null;
       el.textPromptInput.value = "";
@@ -1839,8 +1904,10 @@
       }
       el.prevTargetBtn.disabled = !hasTargets || state.busy;
       el.nextTargetBtn.disabled = !hasTargets || state.busy;
-      el.iterateBtn.disabled = !hasSession || state.busy || hasLockedRegions;
-      el.iterateBtn.title = hasLockedRegions ? "Closed locked regions switch this target to manual mode. Delete all locked regions to run SAM iteration again." : "";
+      el.iterateBtn.disabled = !hasSession || state.busy;
+      el.iterateBtn.title = hasLockedRegions
+        ? "锁区已启用：迭代后会强制保留前景锁区、扣除背景锁区。"
+        : "";
       el.saveLockedOnlyBtn.disabled = !hasSession || state.busy || !hasLockedRegions;
       el.saveCurrentMaskBtn.disabled = !hasSession || state.busy;
       if (el.maskViewToggleBtn) {
@@ -2640,7 +2707,7 @@
       }
 
       cards.push(...regions.map((region, index) => `
-        <div class="stroke-card prompt-record" ${promptRecordAttrs("region", region.region_id || `region_${index}`)}>
+        <div class="stroke-card prompt-record ${state.selectedLockedRegionId === region.region_id ? "selected" : ""}" ${promptRecordAttrs("region", region.region_id || `region_${index}`)}>
           <div class="stroke-row">
             <div>
               <strong>R${index + 1}</strong>
@@ -2648,6 +2715,7 @@
             </div>
             <div class="button-row">
               <span class="subtle">${(region.points || []).length} pts</span>
+              <button class="small-button" data-region-edit="${escapeHtml(region.region_id)}" type="button">编辑</button>
               <button class="small-button" data-region-delete="${escapeHtml(region.region_id)}" type="button">删除</button>
             </div>
           </div>
@@ -2676,6 +2744,13 @@
           renderCanvas();
         });
       });
+      el.lockedRegionList.querySelectorAll("[data-region-edit]").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (state.busy || !state.session) return;
+          selectLockedRegion(button.dataset.regionEdit || "");
+          setStatus("已选中锁区。拖动画布上的顶点可修改形状，松开鼠标后自动保存。");
+        });
+      });
       el.lockedRegionList.querySelectorAll("[data-region-delete]").forEach((button) => {
         button.addEventListener("click", async () => {
           if (state.busy) return;
@@ -2684,6 +2759,9 @@
             const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/lock-region/delete`, {
               region_id: button.dataset.regionDelete,
             });
+            if (state.selectedLockedRegionId === button.dataset.regionDelete) {
+              state.selectedLockedRegionId = "";
+            }
             applySessionPayload(payload);
             clearBusy("Locked region deleted.");
           } catch (error) {
@@ -2979,6 +3057,21 @@
         ctx.lineWidth = hovered ? 3.4 : 1.4;
         ctx.fill();
         ctx.stroke();
+        if (hovered || state.selectedLockedRegionId === region.region_id) {
+          points.forEach((point, pointIndex) => {
+            const x = Number(point.x) - crop.x0;
+            const y = Number(point.y) - crop.y0;
+            ctx.beginPath();
+            ctx.arc(x, y, state.selectedLockedRegionId === region.region_id ? 4.2 : 3.2, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.98)`;
+            ctx.fill();
+            ctx.lineWidth = 1.2;
+            ctx.strokeStyle = pointIndex === state.lockedRegionDrag.pointIndex && state.lockedRegionDrag.regionId === region.region_id
+              ? "rgba(255, 211, 141, 0.98)"
+              : "rgba(9, 16, 24, 0.98)";
+            ctx.stroke();
+          });
+        }
         if (hovered) {
           const first = points[0];
           drawPromptLabel(ctx, `lock ${regionIndex + 1}`, Number(first.x) - crop.x0, Number(first.y) - crop.y0);
@@ -3184,6 +3277,8 @@
       state.maskCache.clear();
       state.drawingStroke.active = false;
       state.drawingStroke.points = [];
+      state.selectedLockedRegionId = "";
+      state.lockedRegionDrag.active = false;
       resetDrawingRegion();
       el.textPromptInput.value = "";
       renderAll();
@@ -3262,6 +3357,12 @@
         state.maskViewMode = "edit";
       }
       ensureSessionPromptState(state.session);
+      if (
+        state.selectedLockedRegionId
+        && !(state.session.locked_regions || []).some((region) => region.region_id === state.selectedLockedRegionId)
+      ) {
+        state.selectedLockedRegionId = "";
+      }
       if (state.session && state.restoredMaskTargetKeys.has(state.session.session_id) && !state.restoredMaskHistoryByTarget.has(state.session.session_id)) {
         state.restoredMaskHistoryByTarget.set(state.session.session_id, state.session.current_history_id);
       }
@@ -4097,19 +4198,15 @@
 
     async function handleIterate() {
       if (!state.session) return;
-      if ((state.session.locked_regions || []).length) {
-        setStatus("SAM iteration is disabled while closed locked regions exist. Delete all locked regions to return to model iteration.", true);
-        renderButtons();
-        return;
-      }
       try {
-        setBusy("Running one local SAM3 iteration...");
+        const lockedCount = (state.session.locked_regions || []).length;
+        setBusy(lockedCount ? "Running SAM3 iteration with locked regions..." : "Running one local SAM3 iteration...");
         const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/iterate`, {
           text_prompt: el.textPromptInput.value,
           line_strokes: state.session.line_strokes || [],
         });
         applySessionPayload(payload);
-        clearBusy("New mask generated.");
+        clearBusy(lockedCount ? "New mask generated. Locked regions were applied as hard constraints." : "New mask generated.");
       } catch (error) {
         state.busy = false;
         renderButtons();
@@ -4121,6 +4218,7 @@
       if (!state.session) return;
       try {
         const mode = saveMode === "locked_only" ? "locked_only" : "locked_union_mask";
+        if (!confirmSaveModeOverwrite(mode)) return;
         if (mode === "locked_union_mask" && shouldConfirmSavingMaskWithSmallLockedRegion()) {
           const ok = window.confirm(
             "当前 Mask 面积明显大于前景锁区。\n\n"
@@ -4222,7 +4320,34 @@
           label: state.currentLabel,
         });
         applySessionPayload(payload);
-        clearBusy("Locked region saved. Manual mode is active while any locked region exists.");
+        clearBusy("Locked region saved. Future iterations will keep foreground locks and subtract background locks.");
+        return true;
+      } catch (error) {
+        state.busy = false;
+        renderButtons();
+        setStatus(error.message || String(error), true);
+        return false;
+      }
+    }
+
+    async function saveEditedLockedRegion(region) {
+      if (!state.session || !region || !(region.points || []).length) return false;
+      const regionPoints = normalizeRegionPointsForSave(region.points || []);
+      if (!regionPoints) {
+        setStatus("锁区修改后仍需要至少 3 个不重合顶点，且面积不能太小。", true);
+        renderCanvas();
+        return false;
+      }
+      try {
+        setBusy("Saving locked region edit...");
+        const payload = await apiPost(`/api/sessions/${encodeURIComponent(state.session.session_id)}/lock-region/update`, {
+          region_id: region.region_id,
+          points: regionPoints,
+          label: region.label,
+        });
+        applySessionPayload(payload);
+        state.selectedLockedRegionId = region.region_id;
+        clearBusy("Locked region updated.");
         return true;
       } catch (error) {
         state.busy = false;
@@ -4417,6 +4542,10 @@
       state.drag.active = false;
       state.drag.moved = false;
       state.drag.mode = "";
+      state.lockedRegionDrag.active = false;
+      state.lockedRegionDrag.regionId = "";
+      state.lockedRegionDrag.pointIndex = -1;
+      state.lockedRegionDrag.originalPoints = [];
       state.drawingStroke.active = false;
       state.drawingStroke.points = [];
       resetDrawingRegion();
@@ -4443,6 +4572,20 @@
         return;
       }
       if (event.button !== 0) return;
+      if (state.currentTool === "region") {
+        const hit = lockedRegionVertexHitAtEvent(event);
+        if (hit) {
+          event.preventDefault();
+          state.selectedLockedRegionId = hit.region.region_id;
+          state.lockedRegionDrag.active = true;
+          state.lockedRegionDrag.regionId = hit.region.region_id;
+          state.lockedRegionDrag.pointIndex = hit.pointIndex;
+          state.lockedRegionDrag.originalPoints = (hit.region.points || []).map((point) => ({ x: Number(point.x), y: Number(point.y) }));
+          setHoveredPrompt("region", hit.region.region_id);
+          renderAll();
+          return;
+        }
+      }
       if (state.currentTool === "line") {
         const xy = clientToImageXY(event);
         if (!xy) return;
@@ -4502,6 +4645,18 @@
     function handleCanvasMouseMove(event) {
       const target = getCurrentTarget();
       if (!target) return;
+      if (state.lockedRegionDrag.active) {
+        const xy = clientToImageXY(event);
+        const region = getSelectedLockedRegion();
+        if (!xy || !region) return;
+        const points = region.points || [];
+        if (state.lockedRegionDrag.pointIndex < 0 || state.lockedRegionDrag.pointIndex >= points.length) return;
+        points[state.lockedRegionDrag.pointIndex] = { x: xy.x, y: xy.y };
+        region.points = points;
+        renderCanvas();
+        renderLockedRegionList();
+        return;
+      }
       if (state.drag.active) {
         const dx = event.clientX - state.drag.startClientX;
         const dy = event.clientY - state.drag.startClientY;
@@ -4545,6 +4700,22 @@
     }
 
     async function handleCanvasMouseUp(event) {
+      if (state.lockedRegionDrag.active) {
+        const region = getSelectedLockedRegion();
+        const originalPoints = state.lockedRegionDrag.originalPoints || [];
+        state.lockedRegionDrag.active = false;
+        state.lockedRegionDrag.regionId = "";
+        state.lockedRegionDrag.pointIndex = -1;
+        state.lockedRegionDrag.originalPoints = [];
+        if (region) {
+          const ok = await saveEditedLockedRegion(region);
+          if (!ok && originalPoints.length) {
+            region.points = originalPoints;
+            renderAll();
+          }
+        }
+        return;
+      }
       if (state.currentTool === "line" && state.drawingStroke.active) {
         const strokePoints = state.drawingStroke.points.slice();
         state.drawingStroke.active = false;

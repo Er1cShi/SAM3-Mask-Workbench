@@ -83,13 +83,14 @@ class RecordingIterationInference:
 
     def iterate(self, target, prompt_box_xyxy, working_points, previous_logits):
         self.iteration_points = [point.to_dict() for point in working_points]
-        mask = np.asarray([[True, False], [False, False]], dtype=bool)
+        mask = np.zeros((int(target.image_height), int(target.image_width)), dtype=bool)
+        mask[0, 0] = True
         return {
             "mask_rle": self._mask_to_rle(mask),
             "mask_area": 1,
             "mask_bbox_xywh": [0.0, 0.0, 1.0, 1.0],
             "score": 0.9,
-            "logits": np.asarray([[[32.0, -32.0], [-32.0, -32.0]]], dtype=np.float32),
+            "logits": np.where(mask, 32.0, -32.0).astype(np.float32)[None, :, :],
         }
 
 
@@ -464,7 +465,7 @@ def test_iteration_strips_generated_points_before_inference(tmp_path):
     assert [point.point_id for point in updated.current_history().manual_points_snapshot] == ["manual_keep"]
 
 
-def test_iteration_is_blocked_while_locked_regions_exist(tmp_path):
+def test_iteration_applies_locked_regions_as_hard_constraints(tmp_path):
     target = _target(tmp_path)
     target_store = UploadedTargetStore(tmp_path / "runs")
     session_store = SessionStore(tmp_path / "sessions")
@@ -480,7 +481,7 @@ def test_iteration_is_blocked_while_locked_regions_exist(tmp_path):
         system_prompt_points=[],
         working_points=[],
         line_strokes=[],
-        locked_regions=[_locked_region("fg", 1, [(1, 1), (5, 1), (5, 5), (1, 5)])],
+        locked_regions=[_locked_region("fg", 1, [(1, 1), (2, 1), (2, 2), (1, 2)])],
         text_prompt="",
         history=[
             HistoryRecord(
@@ -500,7 +501,11 @@ def test_iteration_is_blocked_while_locked_regions_exist(tmp_path):
     )
     session_store.save_session(session)
 
-    with pytest.raises(ValueError, match="closed locked regions"):
-        service.iterate(target.key)
+    service.iterate(target.key)
 
-    assert inference.iteration_points is None
+    assert inference.iteration_points == []
+    updated = session_store.load_session(target.key)
+    assert updated is not None
+    assert updated.current_history().kind == "iteration"
+    mask = inference.mask_from_rle(updated.current_history().mask_rle)
+    assert bool(mask[1, 1]) is True

@@ -238,6 +238,35 @@ def test_save_locked_union_mask_uses_latest_non_lock_history(tmp_path):
     assert payload["session"]["saved_output_preview"]["save_mode"] == "locked_union_mask"
 
 
+def test_update_locked_region_replaces_points_and_records_edit_history(tmp_path):
+    target_store = UploadedTargetStore(tmp_path / "runs")
+    service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())
+    target = _target(tmp_path)
+    target.image_width = 8
+    target.image_height = 8
+    session = _session(target, current_history_id="iter1")
+    for history_item in session.history:
+        history_item.mask_rle = {"size": [8, 8], "points": [[2, 2]]}
+    session.locked_regions = [_locked_region("fg", 1, [(0, 0), (1, 0), (1, 1), (0, 1)])]
+    service._save_session_outputs(session)
+
+    payload = service.update_locked_region(
+        "target_a",
+        "fg",
+        points=[{"x": 2, "y": 2}, {"x": 7, "y": 2}, {"x": 7, "y": 7}, {"x": 2, "y": 7}],
+    )
+
+    updated_region = payload["session"]["locked_regions"][0]
+    assert updated_region["region_id"] == "fg"
+    assert updated_region["points"][0] == {"x": 2.0, "y": 2.0}
+    assert payload["session"]["history"][-1]["kind"] == "region_edit"
+
+    payload = service.save_current_mask("target_a", save_mode="locked_only")
+    preview_points = {tuple(point) for point in payload["saved_current_mask"]["preview_mask_rle"]["points"]}
+    assert (2, 2) in preview_points
+    assert (0, 0) not in preview_points
+
+
 def test_save_locked_union_mask_without_locked_regions_saves_current_mask(tmp_path):
     target_store = UploadedTargetStore(tmp_path / "runs")
     service = MaskIterationService(target_store, SessionStore(tmp_path / "sessions"), DummyInference())

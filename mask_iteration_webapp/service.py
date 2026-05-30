@@ -2973,7 +2973,7 @@ class MaskIterationService:
 
     @staticmethod
     def _is_locked_region_history(history_item: HistoryRecord) -> bool:
-        return history_item.kind in {"region_lock", "region_unlock"}
+        return history_item.kind in {"region_lock", "region_unlock", "region_edit"}
 
     def _base_mask_history_for_save(self, session: SessionState) -> HistoryRecord:
         current = session.current_history()
@@ -4938,6 +4938,68 @@ class MaskIterationService:
             self._save_session_outputs(session)
             return self._session_payload(session)
 
+    def update_locked_region(
+        self,
+        target_key: str,
+        region_id: str,
+        points: Any,
+        label: Any = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            session = self._require_session(target_key)
+            existing = next((region for region in session.locked_regions if region.region_id == region_id), None)
+            if existing is None:
+                raise KeyError(f"Locked region not found: {region_id}")
+            normalized = self._normalize_locked_regions(
+                session,
+                [
+                    {
+                        "region_id": region_id,
+                        "points": points,
+                        "label": existing.label if label is None else label,
+                        "source": existing.source,
+                    }
+                ],
+            )
+            if not normalized:
+                raise ValueError("Locked region requires at least 3 distinct points and a non-trivial polygon area.")
+
+            session.locked_regions = [
+                normalized[0] if region.region_id == region_id else region
+                for region in session.locked_regions
+            ]
+
+            base_history = self._base_mask_history_for_save(session)
+            base_mask = self.inference_service.mask_from_rle(base_history.mask_rle)
+            base_logits = self._ensure_history_logits(session, base_history)
+            combined_mask, updated_logits = self._apply_locked_regions_to_mask_and_logits(
+                session,
+                base_mask,
+                base_logits,
+            )
+
+            history_index = sum(1 for item in session.history if item.kind == "region_edit") + 1
+            history_id = f"edit_lock_{uuid4().hex[:12]}"
+            created_at = utc_now_iso()
+            new_history = self._build_history_from_mask_and_logits(
+                session=session,
+                current=base_history,
+                history_id=history_id,
+                name=f"editLock{history_index}",
+                kind="region_edit",
+                created_at=created_at,
+                mask=combined_mask,
+                logits=updated_logits,
+                score=base_history.score,
+            )
+            session.history.append(new_history)
+            logits_relpath = self.session_store.save_logits(session, history_id, updated_logits)
+            new_history.mask_logits_relpath = logits_relpath
+            session.current_history_id = history_id
+            session.updated_at = created_at
+            self._save_session_outputs(session)
+            return self._session_payload(session)
+
     def delete_target(self, target_key: str) -> dict[str, Any]:
         with self._lock:
             session = self._require_session(target_key)
@@ -5078,11 +5140,6 @@ class MaskIterationService:
     ) -> dict[str, Any]:
         with self._lock:
             session = self._require_session(target_key)
-            if session.locked_regions:
-                raise ValueError(
-                    "SAM iteration is disabled while closed locked regions exist. "
-                    "Delete all locked regions to return to model iteration."
-                )
             if text_prompt is not None:
                 session.text_prompt = str(text_prompt or "").strip()
             if line_strokes is not None:
